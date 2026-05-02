@@ -2,5 +2,6 @@ fastapi
 uvicorn
 python-docx
 python-pptx
+weasyprint
 reportlab
 httpx

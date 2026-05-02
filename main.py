@@ -1,9 +1,19 @@
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from docx import Document
+from docx.shared import Pt, RGBColor, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from pptx import Presentation
+from pptx.util import Pt as PPTXPt, Inches as PPTXInches
+from pptx.dml.color import RGBColor as PPTXRGBColor
+from pptx.enum.text import PP_ALIGN
+from weasyprint import HTML
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-import httpx, io, json, os
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, HRFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+import httpx, io, json, os, re
 
 app = FastAPI()
 
@@ -11,32 +21,102 @@ DEEPINFRA_KEY = os.getenv("DEEPINFRA_KEY")
 VERCEL_BLOB_TOKEN = os.getenv("VERCEL_BLOB_TOKEN")
 
 
-async def call_deepinfra(prompt: str, fmt: str) -> dict:
-    if fmt in ["docx", "pdf"]:
-        schema = '{"title": "...", "sections": [{"heading": "...", "body": "..."}]}'
-    else:
-        schema = '{"title": "...", "slides": [{"title": "...", "bullets": ["...", "..."]}]}'
+# ─── Health check (for cron-job.org keep-alive ping) ────────────────────────
 
-    async with httpx.AsyncClient(timeout=60) as client:
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+# ─── DeepInfra helpers ───────────────────────────────────────────────────────
+
+async def call_deepinfra_json(prompt: str, fmt: str) -> dict:
+    """Ask AI for structured JSON content."""
+    if fmt in ["docx", "pdf"]:
+        schema = """{
+  "title": "Document Title",
+  "subtitle": "Optional subtitle or description",
+  "sections": [
+    {
+      "heading": "Section Heading",
+      "body": "Several paragraphs of detailed content here. Write at least 3-4 sentences per section with rich information.",
+      "subsections": [
+        { "heading": "Subsection", "body": "Subsection content..." }
+      ]
+    }
+  ]
+}"""
+    else:
+        schema = """{
+  "title": "Presentation Title",
+  "subtitle": "Presentation subtitle",
+  "slides": [
+    {
+      "title": "Slide Title",
+      "bullets": ["Bullet point one", "Bullet point two", "Bullet point three"]
+    }
+  ]
+}"""
+
+    system = f"""You are a professional document writer. Return ONLY valid JSON, no markdown fences, no explanation.
+The user will specify how many pages or slides they want — you MUST generate enough content to fill that.
+For documents: each section body must be at least 150 words. Add subsections if needed to fill pages.
+For presentations: generate exactly as many slides as requested, each with 4-6 bullet points.
+Use this exact JSON schema:
+{schema}"""
+
+    async with httpx.AsyncClient(timeout=90) as client:
         res = await client.post(
             "https://api.deepinfra.com/v1/openai/chat/completions",
             headers={"Authorization": f"Bearer {DEEPINFRA_KEY}"},
             json={
                 "model": "deepseek-ai/DeepSeek-V4-Flash",
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": f"Return only valid JSON, no markdown, no explanation. Use this exact schema: {schema}"
-                    },
+                    {"role": "system", "content": system},
                     {"role": "user", "content": prompt}
                 ]
             }
         )
-    return json.loads(res.json()["choices"][0]["message"]["content"])
+    raw = res.json()["choices"][0]["message"]["content"]
+    # Strip markdown fences if model slips them in
+    raw = re.sub(r"```json|```", "", raw).strip()
+    return json.loads(raw)
 
+
+async def call_deepinfra_html(prompt: str) -> str:
+    """Ask AI to generate a beautifully styled HTML document for PDF export."""
+    system = """You are a professional document designer. Return ONLY a complete HTML document with inline CSS.
+Rules:
+- Use beautiful colors, gradients, typography. Make it look like a premium designed report.
+- Use a color palette with a strong primary color (deep purple, navy, teal — pick one per document).
+- Style headings with colored backgrounds or left border accents.
+- Add a styled cover/header section at the top with the title, subtitle, date.
+- Use proper spacing, font sizes, line heights.
+- The user will specify how many pages — generate ENOUGH text content to fill that many pages when printed.
+  A standard A4 page fits roughly 400-500 words. Multiply accordingly and write that much content.
+- Use <div style="page-break-before: always"> to force page breaks at appropriate points.
+- No external fonts or images — use system fonts like Georgia, Arial, or monospace only.
+- Return the full HTML document starting with <!DOCTYPE html>."""
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        res = await client.post(
+            "https://api.deepinfra.com/v1/openai/chat/completions",
+            headers={"Authorization": f"Bearer {DEEPINFRA_KEY}"},
+            json={
+                "model": "deepseek-ai/DeepSeek-V4-Flash",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt}
+                ]
+            }
+        )
+    return res.json()["choices"][0]["message"]["content"]
+
+
+# ─── Vercel Blob upload ──────────────────────────────────────────────────────
 
 async def upload_to_vercel_blob(buffer: io.BytesIO, filename: str, content_type: str) -> str:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         res = await client.put(
             f"https://blob.vercel-storage.com/{filename}",
             content=buffer.read(),
@@ -48,65 +128,238 @@ async def upload_to_vercel_blob(buffer: io.BytesIO, filename: str, content_type:
     return res.json()["url"]
 
 
+# ─── DOCX generation ────────────────────────────────────────────────────────
+
 @app.post("/docs/generate/docx")
 async def generate_docx(payload: dict):
-    structure = await call_deepinfra(payload["prompt"], "docx")
+    structure = await call_deepinfra_json(payload["prompt"], "docx")
 
     doc = Document()
-    doc.add_heading(structure["title"], 0)
-    for section in structure["sections"]:
-        doc.add_heading(section["heading"], level=1)
-        doc.add_paragraph(section["body"])
+
+    # Page margins
+    for section in doc.sections:
+        section.top_margin = Inches(1)
+        section.bottom_margin = Inches(1)
+        section.left_margin = Inches(1.2)
+        section.right_margin = Inches(1.2)
+
+    # Title
+    title_para = doc.add_paragraph()
+    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_run = title_para.add_run(structure["title"])
+    title_run.bold = True
+    title_run.font.size = Pt(28)
+    title_run.font.color.rgb = RGBColor(0x4F, 0x46, 0xE5)  # indigo
+
+    # Subtitle
+    if structure.get("subtitle"):
+        sub_para = doc.add_paragraph()
+        sub_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        sub_run = sub_para.add_run(structure["subtitle"])
+        sub_run.font.size = Pt(13)
+        sub_run.font.color.rgb = RGBColor(0x6B, 0x7A, 0x99)
+        sub_run.italic = True
+
+    doc.add_paragraph()  # spacer
+
+    # Divider
+    divider = doc.add_paragraph("─" * 65)
+    divider.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    divider.runs[0].font.color.rgb = RGBColor(0xC7, 0xD2, 0xFE)
+
+    doc.add_paragraph()
+
+    # Sections
+    for sec in structure.get("sections", []):
+        # Section heading
+        h = doc.add_heading(sec["heading"], level=1)
+        h.paragraph_format.space_before = Pt(16)
+        h.paragraph_format.space_after = Pt(6)
+        for run in h.runs:
+            run.font.color.rgb = RGBColor(0x4F, 0x46, 0xE5)
+            run.font.size = Pt(16)
+            run.bold = True
+
+        # Body
+        body_para = doc.add_paragraph(sec["body"])
+        body_para.paragraph_format.space_after = Pt(10)
+        body_para.paragraph_format.line_spacing = Pt(14)
+        for run in body_para.runs:
+            run.font.size = Pt(11)
+            run.font.color.rgb = RGBColor(0x1F, 0x2A, 0x44)
+
+        # Subsections
+        for sub in sec.get("subsections", []):
+            sh = doc.add_heading(sub["heading"], level=2)
+            for run in sh.runs:
+                run.font.color.rgb = RGBColor(0x7C, 0x3A, 0xED)
+                run.font.size = Pt(13)
+
+            sp = doc.add_paragraph(sub["body"])
+            sp.paragraph_format.space_after = Pt(8)
+            for run in sp.runs:
+                run.font.size = Pt(11)
+                run.font.color.rgb = RGBColor(0x1F, 0x2A, 0x44)
 
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
 
-    url = await upload_to_vercel_blob(buffer, "output.docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    url = await upload_to_vercel_blob(
+        buffer, "output.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
     return {"url": url}
 
 
+# ─── PPTX generation ────────────────────────────────────────────────────────
+
 @app.post("/docs/generate/pptx")
 async def generate_pptx(payload: dict):
-    structure = await call_deepinfra(payload["prompt"], "pptx")
+    structure = await call_deepinfra_json(payload["prompt"], "pptx")
 
     prs = Presentation()
-    title_slide = prs.slides.add_slide(prs.slide_layouts[0])
-    title_slide.shapes.title.text = structure["title"]
+    prs.slide_width = PPTXInches(13.33)
+    prs.slide_height = PPTXInches(7.5)
 
-    for slide_data in structure["slides"]:
-        slide = prs.slides.add_slide(prs.slide_layouts[1])
-        slide.shapes.title.text = slide_data["title"]
-        tf = slide.placeholders[1].text_frame
-        tf.text = slide_data["bullets"][0]
-        for bullet in slide_data["bullets"][1:]:
-            tf.add_paragraph().text = bullet
+    # Color palette
+    PRIMARY = PPTXRGBColor(0x4F, 0x46, 0xE5)    # indigo
+    ACCENT = PPTXRGBColor(0x7C, 0x3A, 0xED)      # purple
+    LIGHT = PPTXRGBColor(0xEE, 0xF2, 0xFF)       # very light indigo
+    DARK = PPTXRGBColor(0x1E, 0x1B, 0x4B)        # dark navy
+    WHITE = PPTXRGBColor(0xFF, 0xFF, 0xFF)
+
+    def set_bg(slide, color: PPTXRGBColor):
+        fill = slide.background.fill
+        fill.solid()
+        fill.fore_color.rgb = color
+
+    def add_text_box(slide, text, left, top, width, height,
+                     font_size=18, bold=False, color=None, align=PP_ALIGN.LEFT):
+        txBox = slide.shapes.add_textbox(
+            PPTXInches(left), PPTXInches(top),
+            PPTXInches(width), PPTXInches(height)
+        )
+        tf = txBox.text_frame
+        tf.word_wrap = True
+        p = tf.paragraphs[0]
+        p.text = text
+        p.alignment = align
+        run = p.runs[0]
+        run.font.size = PPTXPt(font_size)
+        run.font.bold = bold
+        if color:
+            run.font.color.rgb = color
+        return txBox
+
+    # Title slide
+    title_slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
+    set_bg(title_slide, DARK)
+
+    # Accent bar
+    bar = title_slide.shapes.add_shape(
+        1,  # rectangle
+        PPTXInches(0), PPTXInches(3.2),
+        PPTXInches(13.33), PPTXInches(0.08)
+    )
+    bar.fill.solid()
+    bar.fill.fore_color.rgb = ACCENT
+    bar.line.fill.background()
+
+    add_text_box(title_slide, structure["title"],
+                 1, 2, 11, 1.5, font_size=40, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
+
+    if structure.get("subtitle"):
+        add_text_box(title_slide, structure["subtitle"],
+                     1, 3.6, 11, 1, font_size=20, color=PPTXRGBColor(0xC7, 0xD2, 0xFE),
+                     align=PP_ALIGN.CENTER)
+
+    # Content slides
+    for i, slide_data in enumerate(structure.get("slides", [])):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
+
+        # Alternate background: white vs very light
+        bg_color = WHITE if i % 2 == 0 else LIGHT
+        set_bg(slide, bg_color)
+
+        # Left accent bar
+        left_bar = slide.shapes.add_shape(
+            1,
+            PPTXInches(0), PPTXInches(0),
+            PPTXInches(0.12), PPTXInches(7.5)
+        )
+        left_bar.fill.solid()
+        left_bar.fill.fore_color.rgb = PRIMARY
+        left_bar.line.fill.background()
+
+        # Slide number badge
+        badge = slide.shapes.add_shape(
+            1,
+            PPTXInches(11.8), PPTXInches(0.2),
+            PPTXInches(1.2), PPTXInches(0.4)
+        )
+        badge.fill.solid()
+        badge.fill.fore_color.rgb = ACCENT
+        badge.line.fill.background()
+        badge_tf = badge.text_frame
+        badge_tf.paragraphs[0].text = f"{i + 1}"
+        badge_tf.paragraphs[0].alignment = PP_ALIGN.CENTER
+        badge_tf.paragraphs[0].runs[0].font.color.rgb = WHITE
+        badge_tf.paragraphs[0].runs[0].font.size = PPTXPt(12)
+        badge_tf.paragraphs[0].runs[0].font.bold = True
+
+        # Title
+        add_text_box(slide, slide_data["title"],
+                     0.3, 0.3, 11, 1, font_size=28, bold=True, color=DARK)
+
+        # Divider line
+        line = slide.shapes.add_shape(
+            1,
+            PPTXInches(0.3), PPTXInches(1.4),
+            PPTXInches(10), PPTXInches(0.04)
+        )
+        line.fill.solid()
+        line.fill.fore_color.rgb = PPTXRGBColor(0xC7, 0xD2, 0xFE)
+        line.line.fill.background()
+
+        # Bullets
+        txBox = slide.shapes.add_textbox(
+            PPTXInches(0.5), PPTXInches(1.6),
+            PPTXInches(12), PPTXInches(5.5)
+        )
+        tf = txBox.text_frame
+        tf.word_wrap = True
+
+        for j, bullet in enumerate(slide_data.get("bullets", [])):
+            p = tf.add_paragraph() if j > 0 else tf.paragraphs[0]
+            p.text = f"  •  {bullet}"
+            p.space_before = PPTXPt(8)
+            run = p.runs[0]
+            run.font.size = PPTXPt(18)
+            run.font.color.rgb = PPTXRGBColor(0x1F, 0x2A, 0x44)
 
     buffer = io.BytesIO()
     prs.save(buffer)
     buffer.seek(0)
 
-    url = await upload_to_vercel_blob(buffer, "output.pptx",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    url = await upload_to_vercel_blob(
+        buffer, "output.pptx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
     return {"url": url}
 
 
+# ─── PDF generation (WeasyPrint from AI-generated HTML) ─────────────────────
+
 @app.post("/docs/generate/pdf")
 async def generate_pdf(payload: dict):
-    structure = await call_deepinfra(payload["prompt"], "pdf")
+    html_content = await call_deepinfra_html(payload["prompt"])
+
+    # Strip markdown fences if model wraps in ```html
+    html_content = re.sub(r"^```html\s*|^```\s*|```$", "", html_content, flags=re.MULTILINE).strip()
 
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter)
-    story = []
-    story.append(Paragraph(f"<b>{structure['title']}</b>"))
-    story.append(Spacer(1, 12))
-    for section in structure["sections"]:
-        story.append(Paragraph(f"<b>{section['heading']}</b>"))
-        story.append(Spacer(1, 6))
-        story.append(Paragraph(section["body"]))
-        story.append(Spacer(1, 12))
-    doc.build(story)
+    HTML(string=html_content).write_pdf(buffer)
     buffer.seek(0)
 
     url = await upload_to_vercel_blob(buffer, "output.pdf", "application/pdf")
