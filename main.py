@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -19,6 +19,14 @@ app = FastAPI()
 
 DEEPINFRA_KEY = os.getenv("DEEPINFRA_KEY")
 VERCEL_BLOB_TOKEN = os.getenv("VERCEL_BLOB_TOKEN")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {str(exc) or 'Document generation failed'}"},
+    )
 
 
 # ─── Health check ────────────────────────────────────────────────────────────
@@ -45,6 +53,28 @@ def requested_count(prompt: str, unit: str, default: int, minimum: int, maximum:
         if re.search(r"\b"+word+r"\s+(?:-|\s)?"+re.escape(unit)+r"s?\b", normalized):
             return max(minimum, min(maximum, value))
     return default
+
+
+def _as_json(raw: str, label: str) -> dict:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail=f"{label} returned invalid JSON") from exc
+
+
+def _blob_value(blob, key: str, default=None):
+    if isinstance(blob, dict):
+        return blob.get(key, default)
+    return getattr(blob, key, default)
+
+
+def _generation_error(exc: Exception):
+    if isinstance(exc, HTTPException):
+        raise exc
+    raise HTTPException(
+        status_code=500,
+        detail=f"{type(exc).__name__}: {str(exc) or 'Document generation failed'}",
+    ) from exc
 
 
 async def _deepinfra_call(messages: list, temperature: float = 0.4) -> str:
@@ -88,11 +118,16 @@ async def upload_to_vercel_blob(buffer: io.BytesIO, filename: str, content_type:
             pathname, buffer.read(), access="public",
             content_type=content_type, add_random_suffix=False, overwrite=True,
         )
+    url = _blob_value(blob, "url")
+    if not url:
+        raise HTTPException(status_code=502, detail="Vercel Blob upload returned no URL")
+
+    download_url = _blob_value(blob, "download_url") or _blob_value(blob, "downloadUrl") or url
     return {
-        "url": blob.url,
-        "downloadUrl": getattr(blob, "download_url", blob.url),
-        "pathname": blob.pathname,
-        "contentType": getattr(blob, "content_type", content_type),
+        "url": url,
+        "downloadUrl": download_url,
+        "pathname": _blob_value(blob, "pathname", pathname),
+        "contentType": _blob_value(blob, "content_type") or _blob_value(blob, "contentType") or content_type,
     }
 
 
@@ -208,7 +243,7 @@ RULES:
         {"role": "system", "content": system},
         {"role": "user", "content": prompt},
     ], temperature=0.38)
-    data = json.loads(raw)
+    data = _as_json(raw, "PDF content generator")
     pages = data.get("pages", [])
     while len(pages) < page_count:
         i = len(pages)
@@ -1268,15 +1303,18 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
 
 @app.post("/docs/generate/pdf")
 async def generate_pdf(payload: dict):
-    prompt = payload["prompt"]
-    page_count = requested_count(prompt, "page", default=5, minimum=1, maximum=15)
-    structure = await call_ai_pdf(prompt, page_count)
-    html_doc, pagination_css = render_pdf_html(structure, page_count)
-    buffer = io.BytesIO()
-    HTML(string=html_doc).write_pdf(buffer, stylesheets=[pagination_css])
-    buffer.seek(0)
-    blob = await upload_to_vercel_blob(buffer, "output.pdf", "application/pdf")
-    return blob
+    try:
+        prompt = payload["prompt"]
+        page_count = requested_count(prompt, "page", default=5, minimum=1, maximum=15)
+        structure = await call_ai_pdf(prompt, page_count)
+        html_doc, pagination_css = render_pdf_html(structure, page_count)
+        buffer = io.BytesIO()
+        HTML(string=html_doc).write_pdf(buffer, stylesheets=[pagination_css])
+        buffer.seek(0)
+        blob = await upload_to_vercel_blob(buffer, "output.pdf", "application/pdf")
+        return blob
+    except Exception as exc:
+        _generation_error(exc)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1338,7 +1376,7 @@ RULES:
         {"role": "system", "content": system},
         {"role": "user", "content": prompt},
     ], temperature=0.4)
-    data = json.loads(raw)
+    data = _as_json(raw, "Presentation content generator")
     slides = data.get("slides", [])
     while len(slides) < slide_count:
         i = len(slides)
@@ -1627,7 +1665,7 @@ RULES:
         {"role": "system", "content": system},
         {"role": "user", "content": prompt},
     ], temperature=0.38)
-    return json.loads(raw)
+    return _as_json(raw, "DOCX content generator")
 
 
 def _set_cell_bg(cell, hex_color: str):
