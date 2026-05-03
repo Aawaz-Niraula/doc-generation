@@ -207,6 +207,11 @@ PALETTES = {
         "wash":"#EBF5FB","text":"#0A1F3D","dark":"#0A1F3D","soft":"#AED6F1",
         "white":"#FFFFFF","body":"#374151","card2":"#154F7A","muted":"#7EC8E3",
     },
+    "monochrome": {
+        "primary":"#000000","accent":"#888888","mid":"#555555","light":"#E5E5E5",
+        "wash":"#F5F5F5","text":"#111111","dark":"#000000","soft":"#CCCCCC",
+        "white":"#FFFFFF","body":"#333333","card2":"#222222","muted":"#999999",
+    },
 }
 
 INTERIOR_LAYOUTS = ["split","feature","grid","quote","timeline","stats","editorial","manifesto"]
@@ -218,7 +223,7 @@ Generate content for exactly {page_count} PDF pages. Each page maps 1:1 to one p
 
 PALETTE — pick one that emotionally fits the topic:
 indigo=tech/professional, teal=health/sustainability, crimson=energy/urgency, emerald=growth/nature,
-slate=enterprise/legal, violet=creative/luxury, amber=warmth/food/culture, rose=beauty/lifestyle, navy=corporate/finance
+slate=enterprise/legal, violet=creative/luxury, amber=warmth/food/culture, rose=beauty/lifestyle, navy=corporate/finance, monochrome=minimalist/legal
 
 PAGE TYPES (use variety, never same type twice in a row):
 - "cover"      → page 1 only: big hero title, subtitle, author tagline
@@ -237,22 +242,23 @@ For "timeline": provide "steps": [{{"step":"label","desc":"one sentence"}}] (3-4
 For "stats": provide "stats": [{{"number":"value","label":"what it measures","sub":"one sentence context"}}] (exactly 3)
 For "closing": provide "takeaways": ["short takeaway"] (3-4 items)
 For "manifesto": provide "statements": ["Bold declarative sentence."] (3 statements)
+OPTIONAL: Any page can include "chart_data": [["Label 1", 40], ["Label 2", 80], ["Label 3", 55]] for a data visualization. Use 3-7 items.
 
 JSON schema:
 {{
   "title": "Document title",
   "subtitle": "Compelling subtitle",
-  "palette": "indigo|teal|crimson|emerald|slate|violet|amber|rose|navy",
+  "palette": "indigo|teal|crimson|emerald|slate|violet|amber|rose|navy|monochrome",
   "author": "Prepared for [topic] — 2025",
   "pages": [
     {{
       "type": "cover|split|feature|grid|quote|timeline|stats|editorial|manifesto|closing",
       "eyebrow": "SECTION LABEL",
       "heading": "Compelling page headline",
-      "body": "Rich paragraph, minimum 60 words, specific and insightful.",
+      "body": "Rich paragraph, minimum 80 words, specific and insightful.",
       "highlights": ["Punchy point one", "Punchy point two", "Punchy point three"],
       "callout": "One memorable quotable sentence.",
-      "tiles": [], "steps": [], "stats": [], "takeaways": [], "statements": []
+      "tiles": [], "steps": [], "stats": [], "takeaways": [], "statements": [], "chart_data": []
     }}
   ]
 }}
@@ -439,6 +445,106 @@ def _svg_manifesto_bg(dark: str, accent: str) -> str:
         f'</svg>'
     )
 
+# ─── Data-driven SVG Charts ───────────────────────────────────────────────────
+
+def _generate_svg_bar_chart(data: list, width=500, height=160, bar_color="#C9A84C", bg="#1E3A5F", title="") -> str:
+    if not data: return ""
+    uid = uuid.uuid4().hex[:6]
+    max_val = max((d[1] for d in data), default=1)
+    if max_val == 0: max_val = 1
+    bars_html = ""
+    w = width - 80
+    h = height - 40
+    bar_w = min(40, int(w / len(data)) - 10)
+    for i, (label, val) in enumerate(data):
+        bx = 40 + i * (w / len(data)) + (w / len(data) - bar_w) / 2
+        bh = (val / max_val) * h
+        by = height - 25 - bh
+        bars_html += f'<rect x="{bx}" y="{by}" width="{bar_w}" height="{bh}" rx="4" fill="url(#barGrad{uid})" filter="url(#dropShadow{uid})"/>'
+        bars_html += f'<text x="{bx+bar_w/2}" y="{by-5}" fill="#FFFFFF" font-family="Helvetica" font-size="9" text-anchor="middle" font-weight="bold">{val}</text>'
+        bars_html += f'<text x="{bx+bar_w/2}" y="{height-10}" fill="rgba(255,255,255,0.7)" font-family="Helvetica" font-size="8" text-anchor="middle">{escape(str(label)[:8])}</text>'
+    
+    grid = "".join(f'<line x1="30" y1="{height-25 - (i*h/4)}" x2="{width-20}" y2="{height-25 - (i*h/4)}" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>' for i in range(1, 5))
+    
+    return f"""<div style="margin-bottom:20px;">
+    <svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+            <linearGradient id="barGrad{uid}" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="{bar_color}" />
+                <stop offset="100%" stop-color="{bar_color}" stop-opacity="0.4" />
+            </linearGradient>
+            <filter id="dropShadow{uid}" x="-20%" y="-20%" width="140%" height="140%">
+                <feDropShadow dx="0" dy="4" stdDeviation="3" flood-color="#000000" flood-opacity="0.3"/>
+            </filter>
+        </defs>
+        <rect width="{width}" height="{height}" rx="12" fill="{bg}"/>
+        {f'<text x="15" y="18" fill="#FFFFFF" font-family="Helvetica" font-size="11" font-weight="bold">{escape(title)}</text>' if title else ''}
+        {grid}
+        <line x1="30" y1="{height-25}" x2="{width-20}" y2="{height-25}" stroke="rgba(255,255,255,0.4)" stroke-width="1.5"/>
+        {bars_html}
+    </svg></div>"""
+
+def _generate_svg_donut(segments: list, size=160, thickness=35, title="") -> str:
+    if not segments: return ""
+    total = sum(d[1] for d in segments)
+    if total == 0: return ""
+    cx, cy, r = size/2, size/2, (size - thickness)/2
+    paths = ""
+    start_angle = -math.pi / 2
+    for label, val, color in segments:
+        angle = (val / total) * 2 * math.pi
+        end_angle = start_angle + angle
+        x1 = cx + r * math.cos(start_angle)
+        y1 = cy + r * math.sin(start_angle)
+        x2 = cx + r * math.cos(end_angle)
+        y2 = cy + r * math.sin(end_angle)
+        large_arc = 1 if angle > math.pi else 0
+        d = f"M {x1} {y1} A {r} {r} 0 {large_arc} 1 {x2} {y2}"
+        paths += f'<path d="{d}" fill="none" stroke="{color}" stroke-width="{thickness}" stroke-linecap="butt"/>'
+        # Add a tiny gap via stroke-dasharray if desired, but butt cap + math usually is fine, or we inject small white lines
+        start_angle = end_angle
+    
+    return f"""<div style="text-align:center; margin-bottom:15px;">
+    <svg width="{size}" height="{size}" viewBox="0 0 {size} {size}" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="rgba(0,0,0,0.05)" stroke-width="{thickness}"/>
+        {paths}
+        {f'<text x="{cx}" y="{cy}" fill="#333" font-family="Helvetica" font-size="14" font-weight="bold" text-anchor="middle" dominant-baseline="middle">{escape(title)}</text>' if title else ''}
+    </svg></div>"""
+
+def _generate_svg_area_chart(data: list, width=500, height=130, line_color="#4A90D9", title="") -> str:
+    if not data: return ""
+    uid = uuid.uuid4().hex[:6]
+    max_val = max((d[1] for d in data), default=1)
+    if max_val == 0: max_val = 1
+    w = width - 40
+    h = height - 30
+    pts = []
+    circles = ""
+    labels = ""
+    for i, (label, val) in enumerate(data):
+        px = 20 + i * (w / max(1, len(data)-1))
+        py = height - 20 - (val / max_val) * h
+        pts.append((px, py))
+        circles += f'<circle cx="{px}" cy="{py}" r="4" fill="{line_color}" stroke="#FFF" stroke-width="1.5"/>'
+        labels += f'<text x="{px}" y="{height-5}" fill="rgba(0,0,0,0.6)" font-family="Helvetica" font-size="8" text-anchor="middle">{escape(str(label)[:8])}</text>'
+    
+    path_d = "M " + " L ".join(f"{x},{y}" for x, y in pts)
+    area_d = f"M {pts[0][0]},{height-20} L " + " L ".join(f"{x},{y}" for x, y in pts) + f" L {pts[-1][0]},{height-20} Z"
+
+    return f"""<div style="margin-bottom:20px;">
+    <svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+            <linearGradient id="areaGrad{uid}" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="{line_color}" stop-opacity="0.4"/>
+                <stop offset="100%" stop-color="{line_color}" stop-opacity="0.02"/>
+            </linearGradient>
+        </defs>
+        <path d="{area_d}" fill="url(#areaGrad{uid})"/>
+        <path d="{path_d}" fill="none" stroke="{line_color}" stroke-width="2.5" stroke-linecap="round"/>
+        {circles}
+        {labels}
+        <line x1="20" y1="{height-20}" x2="{width-20}" y2="{height-20}" stroke="rgba(0,0,0,0.1)" stroke-width="1"/>
+    </svg></div>"""
 
 # ─── Footer / running elements ────────────────────────────────────────────────
 
@@ -557,19 +663,62 @@ def render_pdf_html(structure: dict, page_count: int) -> str:
   --white:   {P['white']};
   --card2:   {P['card2']};
   --muted:   {P['muted']};
+
+  /* Typography Scale */
+  --text-xs: 7pt;   --text-sm: 8.5pt;  --text-base: 10pt;
+  --text-lg: 12pt;  --text-xl: 16pt;   --text-2xl: 22pt;
+  --text-3xl: 30pt; --text-4xl: 42pt;  --text-display: 58pt;
+  --leading-tight: 1.2; --leading-normal: 1.5; --leading-relaxed: 1.7;
+
+  /* 8-Point Spacing Grid */
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px;
+  --space-6:24px; --space-8:32px; --space-12:48px; --space-16:64px;
+
+  /* Shadow System */
+  --shadow-sm: 2px 2px 6px rgba(0,0,0,0.35);
+  --shadow-md: 4px 4px 14px rgba(0,0,0,0.45);
+  --shadow-lg: 6px 8px 24px rgba(0,0,0,0.55);
+  --shadow-card: 3px 3px 10px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.06);
 }}"""
 
     global_css = f"""
 @page {{
   size: A4;
   margin: 0;
+  background: var(--white);
 }}
+
+/* @page Running Headers & Footers (applied to .page elements via running elements if needed, but weasyprint supports standard page box if we define it on the page) */
+@page :not(:first) {{
+  @top-center {{
+    content: string(chapter-name);
+    font-size: var(--text-xs);
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    color: var(--muted);
+    border-bottom: 0.5pt solid var(--light);
+    padding-bottom: 4pt;
+    margin-top: 8mm;
+  }}
+}}
+
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 html, body {{
   font-family: Georgia, 'Times New Roman', serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* WEASYPRINT FIXES */
+  overflow-wrap: break-word;
+  word-break: break-word;
+  hyphens: auto;
 }}
+img {{ max-width: 100%; height: auto; display: block; }}
+h1, h2, h3, h4, h5, h6, .eyebrow {{
+  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}}
+code, pre {{
+  font-family: 'Courier New', Courier, monospace;
+}}
+
 {css_vars}
 
 /* ═══════════════════════════════════════════
@@ -1113,7 +1262,23 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
         stats      = page.get("stats") or []
         takeaways  = page.get("takeaways") or []
         statements = page.get("statements") or []
-        visual     = _visual_panel(P, idx, heading)
+        chart_data = page.get("chart_data") or []
+
+        if chart_data and isinstance(chart_data, list) and len(chart_data) > 0 and len(chart_data[0]) >= 2:
+            try:
+                # Basic validation
+                valid_data = [(str(d[0]), float(d[1])) for d in chart_data[:8]]
+                # Distribute chart types based on index
+                if idx % 3 == 0:
+                    visual = _generate_svg_donut(valid_data, title=heading)
+                elif idx % 3 == 1:
+                    visual = _generate_svg_area_chart(valid_data, line_color=P["accent"], title=heading)
+                else:
+                    visual = _generate_svg_bar_chart(valid_data, bar_color=P["accent"], bg=P["primary"], title=heading)
+            except (ValueError, TypeError):
+                visual = _visual_panel(P, idx, heading)
+        else:
+            visual = _visual_panel(P, idx, heading)
 
         # ── COVER ──────────────────────────────────────────────────────────
         if ptype == "cover":
@@ -1437,6 +1602,32 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
     return html_doc, pagination_css
 
 
+def _quality_check(pdf_bytes: bytes) -> dict:
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        pages = len(reader.pages)
+        size_kb = len(pdf_bytes) / 1024
+        issues = []
+        if pages < 8:
+            issues.append(f"Warning: Only {pages} pages generated (fewer than 8).")
+        if size_kb < 80:
+            issues.append(f"Warning: File size is {size_kb:.1f}KB (under 80KB, styles may be missing).")
+        elif size_kb > 15000:
+            issues.append(f"Warning: File size is {size_kb:.1f}KB (over 15MB, unoptimised).")
+        
+        # Check dimensions of first page (A4 is approx 595x842 points)
+        if pages > 0:
+            box = reader.pages[0].mediabox
+            w, h = float(box.width), float(box.height)
+            if not (590 <= w <= 600 and 837 <= h <= 847) and not (837 <= w <= 847 and 590 <= h <= 600):
+                issues.append(f"Warning: Invalid page dimensions {w}x{h} (not A4).")
+                
+        return {"pages": pages, "size_kb": round(size_kb, 1), "issues": issues, "passed": len(issues) == 0}
+    except Exception as e:
+        return {"pages": 0, "size_kb": 0, "issues": [f"Quality check failed: {str(e)}"], "passed": False}
+
+
 @app.post("/docs/generate/pdf")
 async def generate_pdf(payload: dict):
     try:
@@ -1446,8 +1637,15 @@ async def generate_pdf(payload: dict):
         html_doc, pagination_css = render_pdf_html(structure, page_count)
         buffer = io.BytesIO()
         HTML(string=html_doc).write_pdf(buffer, stylesheets=[pagination_css])
+        pdf_bytes = buffer.getvalue()
+        
+        # Run quality check
+        qa_result = _quality_check(pdf_bytes)
+        print(f"PDF QA Check: {qa_result}")
+        
         buffer.seek(0)
         blob = await upload_to_vercel_blob(buffer, "output.pdf", "application/pdf")
+        blob["qa_check"] = qa_result
         return blob
     except Exception as exc:
         _generation_error(exc)
