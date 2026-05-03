@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches, Cm
@@ -18,7 +18,7 @@ from vercel.blob import AsyncBlobClient
 app = FastAPI()
 
 DEEPINFRA_KEY = os.getenv("DEEPINFRA_KEY")
-VERCEL_BLOB_TOKEN = os.getenv("VERCEL_BLOB_TOKEN") or os.getenv("BLOB_READ_WRITE_TOKEN")
+VERCEL_BLOB_TOKEN = os.getenv("VERCEL_BLOB_TOKEN")
 
 
 # ─── Health check ────────────────────────────────────────────────────────────
@@ -48,6 +48,9 @@ def requested_count(prompt: str, unit: str, default: int, minimum: int, maximum:
 
 
 async def _deepinfra_call(messages: list, temperature: float = 0.4) -> str:
+    if not DEEPINFRA_KEY:
+        raise HTTPException(status_code=500, detail="DEEPINFRA_KEY is not configured on the Render document service")
+
     async with httpx.AsyncClient(timeout=120) as client:
         res = await client.post(
             "https://api.deepinfra.com/v1/openai/chat/completions",
@@ -58,7 +61,18 @@ async def _deepinfra_call(messages: list, temperature: float = 0.4) -> str:
                 "messages": messages,
             },
         )
-    raw = res.json()["choices"][0]["message"]["content"]
+
+    if res.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"DeepInfra request failed ({res.status_code}): {res.text[:500]}",
+        )
+
+    try:
+        raw = res.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail="DeepInfra returned an invalid response") from exc
+
     return re.sub(r"```json|```", "", raw).strip()
 
 
@@ -66,7 +80,7 @@ async def _deepinfra_call(messages: list, temperature: float = 0.4) -> str:
 
 async def upload_to_vercel_blob(buffer: io.BytesIO, filename: str, content_type: str) -> dict:
     if not VERCEL_BLOB_TOKEN:
-        raise RuntimeError("VERCEL_BLOB_TOKEN or BLOB_READ_WRITE_TOKEN is not configured")
+        raise HTTPException(status_code=500, detail="VERCEL_BLOB_TOKEN is not configured on the Render document service")
     buffer.seek(0)
     pathname = f"generated/{uuid.uuid4().hex}-{filename}"
     async with AsyncBlobClient(token=VERCEL_BLOB_TOKEN) as client:
