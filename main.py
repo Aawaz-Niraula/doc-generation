@@ -11,7 +11,7 @@ from pptx.dml.color import RGBColor as PPTXRGBColor
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Pt as PPTXPt
 from weasyprint import HTML, CSS
-import httpx, io, json, os, re, uuid, math
+import httpx, io, json, os, re, uuid, math, traceback
 from html import escape
 from vercel.blob import AsyncBlobClient
 
@@ -21,11 +21,17 @@ DEEPINFRA_KEY = os.getenv("DEEPINFRA_KEY")
 VERCEL_BLOB_TOKEN = os.getenv("VERCEL_BLOB_TOKEN")
 
 
+def _exception_detail(exc: Exception) -> str:
+    trace_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    tail = "".join(trace_lines[-8:]).strip()
+    return f"{type(exc).__name__}: {str(exc) or 'Document generation failed'}\n{tail}"
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request, exc):
     return JSONResponse(
         status_code=500,
-        content={"detail": f"{type(exc).__name__}: {str(exc) or 'Document generation failed'}"},
+        content={"detail": _exception_detail(exc)},
     )
 
 
@@ -71,10 +77,7 @@ def _blob_value(blob, key: str, default=None):
 def _generation_error(exc: Exception):
     if isinstance(exc, HTTPException):
         raise exc
-    raise HTTPException(
-        status_code=500,
-        detail=f"{type(exc).__name__}: {str(exc) or 'Document generation failed'}",
-    ) from exc
+    raise HTTPException(status_code=500, detail=_exception_detail(exc)) from exc
 
 
 async def _deepinfra_call(messages: list, temperature: float = 0.4) -> str:
