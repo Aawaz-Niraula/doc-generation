@@ -96,7 +96,10 @@ def _enforce_no_consecutive_layouts(items, type_key="type",
         prev = items[i - 1].get(type_key, "") if i > 0 else ""
         if curr == prev:
             nxt = items[i + 1].get(type_key, "") if i + 1 < len(items) else ""
-            for alt in interior_types:
+            import random
+            shuffled_alts = list(interior_types)
+            random.shuffle(shuffled_alts)
+            for alt in shuffled_alts:
                 if alt != prev and alt != nxt:
                     items[i][type_key] = alt
                     break
@@ -242,7 +245,10 @@ For "timeline": provide "steps": [{{"step":"label","desc":"one sentence"}}] (3-4
 For "stats": provide "stats": [{{"number":"value","label":"what it measures","sub":"one sentence context"}}] (exactly 3)
 For "closing": provide "takeaways": ["short takeaway"] (3-4 items)
 For "manifesto": provide "statements": ["Bold declarative sentence."] (3 statements)
-OPTIONAL: Any page can include "chart_data": [["Label 1", 40], ["Label 2", 80], ["Label 3", 55]] for a data visualization. Use 3-7 items.
+
+MANDATORY DATA REQUIREMENTS:
+1. You MUST include "chart_data": [["Label 1", 40], ["Label 2", 80], ["Label 3", 55]] (3-7 items) on AT LEAST TWO pages (e.g. stats, grid, feature) containing highly realistic statistical data for the topic.
+2. You MUST include an "image_keyword" (1-3 words, e.g. "deforestation trees", "solar panels") on AT LEAST TWO pages.
 
 JSON schema:
 {{
@@ -258,7 +264,8 @@ JSON schema:
       "body": "Rich paragraph, minimum 80 words, specific and insightful.",
       "highlights": ["Punchy point one", "Punchy point two", "Punchy point three"],
       "callout": "One memorable quotable sentence.",
-      "tiles": [], "steps": [], "stats": [], "takeaways": [], "statements": [], "chart_data": []
+      "tiles": [], "steps": [], "stats": [], "takeaways": [], "statements": [],
+      "chart_data": [], "image_keyword": ""
     }}
   ]
 }}
@@ -295,6 +302,36 @@ RULES:
         pin_first="cover", pin_last="closing",
     )
     return data
+
+
+async def _fetch_single_image(client: httpx.AsyncClient, url: str, page_dict: dict):
+    try:
+        resp = await client.get(url)
+        if resp.status_code == 200:
+            import base64
+            b64 = base64.b64encode(resp.content).decode("utf-8")
+            # Pollinations returns JPEG by default
+            page_dict["image_data"] = f"data:image/jpeg;base64,{b64}"
+    except Exception:
+        # Silently fail, WeasyPrint will fall back to SVG
+        pass
+
+
+async def _prefetch_images(structure: dict):
+    import asyncio
+    import urllib.parse
+    # Increased timeout to 25 seconds because Pollinations AI generates images on the fly. 
+    # Since these run concurrently, this adds at most 25s total to the generation time.
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        tasks = []
+        for page in structure.get("pages", []):
+            kw = page.get("image_keyword")
+            if kw and str(kw).strip():
+                encoded_kw = urllib.parse.quote(str(kw).strip() + " photorealistic high quality")
+                url = f"https://image.pollinations.ai/prompt/{encoded_kw}?width=800&height=400&nologo=true"
+                tasks.append(_fetch_single_image(client, url, page))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # ─── SVG decorative helpers (WeasyPrint renders inline SVG natively) ─────────
@@ -1263,12 +1300,26 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
         takeaways  = page.get("takeaways") or []
         statements = page.get("statements") or []
         chart_data = page.get("chart_data") or []
+        image_data = page.get("image_data") or ""
 
-        if chart_data and isinstance(chart_data, list) and len(chart_data) > 0 and len(chart_data[0]) >= 2:
+        visual = None
+        has_chart = chart_data and isinstance(chart_data, list) and len(chart_data) > 0 and len(chart_data[0]) >= 2
+        has_image = bool(image_data.strip())
+
+        # If both are provided, alternate them to ensure variety
+        if has_chart and has_image:
+            if idx % 2 == 0:
+                has_image = False
+            else:
+                has_chart = False
+
+        if has_image:
+            visual = f"""<div class="visual-panel" style="padding:0; border:none;">
+  <img src="{image_data}" style="width:100%; height:100%; object-fit:cover; display:block;" />
+</div>"""
+        elif has_chart:
             try:
-                # Basic validation
                 valid_data = [(str(d[0]), float(d[1])) for d in chart_data[:8]]
-                # Distribute chart types based on index
                 if idx % 3 == 0:
                     visual = _generate_svg_donut(valid_data, title=heading)
                 elif idx % 3 == 1:
@@ -1276,8 +1327,9 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
                 else:
                     visual = _generate_svg_bar_chart(valid_data, bar_color=P["accent"], bg=P["primary"], title=heading)
             except (ValueError, TypeError):
-                visual = _visual_panel(P, idx, heading)
-        else:
+                pass
+                
+        if not visual:
             visual = _visual_panel(P, idx, heading)
 
         # ── COVER ──────────────────────────────────────────────────────────
@@ -1634,6 +1686,7 @@ async def generate_pdf(payload: dict):
         prompt = payload["prompt"]
         page_count = requested_count(prompt, "page", default=5, minimum=1, maximum=15)
         structure = await call_ai_pdf(prompt, page_count)
+        await _prefetch_images(structure)
         html_doc, pagination_css = render_pdf_html(structure, page_count)
         buffer = io.BytesIO()
         HTML(string=html_doc).write_pdf(buffer, stylesheets=[pagination_css])
