@@ -5,3 +5,4 @@ python-pptx
 weasyprint
 reportlab
 httpx
+vercel
