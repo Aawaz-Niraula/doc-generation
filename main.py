@@ -107,7 +107,7 @@ async def _deepinfra_call(messages: list, temperature: float = 0.4) -> str:
     if not DEEPINFRA_KEY:
         raise HTTPException(status_code=500, detail="DEEPINFRA_KEY is not configured on the Render document service")
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=300) as client:
         res = await client.post(
             "https://api.deepinfra.com/v1/openai/chat/completions",
             headers={"Authorization": f"Bearer {DEEPINFRA_KEY}"},
