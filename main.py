@@ -472,13 +472,13 @@ html, body {{
 .page {{
   width: 210mm;
   height: 297mm;
+  break-after: page;
   page-break-after: always;
-  page-break-inside: avoid;
-  break-inside: avoid;
   position: relative;
   overflow: hidden;
 }}
 .page:last-child {{
+  break-after: auto;
   page-break-after: auto;
 }}
 
@@ -1284,7 +1284,8 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
     # WeasyPrint: pass unbreakable CSS via the CSS object for robust pagination
     pagination_css = CSS(string="""
         @page { size: A4; margin: 0; }
-        .page { page-break-after: always; page-break-inside: avoid; }
+        .page { break-after: page; page-break-after: always; }
+        .page:last-child { break-after: auto; page-break-after: auto; }
         p, li { orphans: 3; widows: 3; }
         .split-card, .feature-card, .grid-tile, .stats-card, .timeline-step,
         .closing-takeaway, .quote-box, .manifesto-statement,
