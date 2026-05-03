@@ -427,6 +427,49 @@ def _eyebrow(text: str, accent: str, light: bool = False) -> str:
     return f'<div class="eyebrow" style="color:{color};">{text}</div>'
 
 
+def _clip_words(value: str, limit: int) -> str:
+    words = str(value or "").split()
+    if len(words) <= limit:
+        return " ".join(words)
+    return " ".join(words[:limit]).rstrip(".,;:") + "."
+
+
+def _clip_chars(value: str, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(".,;:") + "."
+
+
+def _visual_panel(P: dict, idx: int, label: str = "") -> str:
+    label_text = escape(_clip_chars(label or "Visual Brief", 42))
+    return f"""
+<div class="visual-panel">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 210" preserveAspectRatio="none">
+    <defs>
+      <linearGradient id="vp{idx}" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="{P['light']}"/>
+        <stop offset="58%" stop-color="{P['wash']}"/>
+        <stop offset="100%" stop-color="{P['soft']}"/>
+      </linearGradient>
+    </defs>
+    <rect width="620" height="210" rx="22" fill="url(#vp{idx})"/>
+    <circle cx="520" cy="55" r="95" fill="{P['accent']}" opacity=".15"/>
+    <circle cx="92" cy="184" r="78" fill="{P['mid']}" opacity=".16"/>
+    <path d="M95 158 C140 92, 198 82, 250 128 S365 160, 428 82 S540 45, 588 89" fill="none" stroke="{P['accent']}" stroke-width="5" opacity=".55"/>
+    <path d="M135 150 C150 112, 168 84, 196 58" fill="none" stroke="{P['primary']}" stroke-width="4" stroke-linecap="round"/>
+    <ellipse cx="206" cy="50" rx="34" ry="18" fill="{P['accent']}" opacity=".75" transform="rotate(-22 206 50)"/>
+    <ellipse cx="166" cy="86" rx="28" ry="15" fill="{P['mid']}" opacity=".70" transform="rotate(28 166 86)"/>
+    <ellipse cx="142" cy="126" rx="25" ry="13" fill="{P['primary']}" opacity=".42" transform="rotate(-35 142 126)"/>
+    <path d="M432 159 C445 121, 468 94, 502 66" fill="none" stroke="{P['primary']}" stroke-width="4" stroke-linecap="round"/>
+    <ellipse cx="512" cy="58" rx="31" ry="16" fill="{P['accent']}" opacity=".72" transform="rotate(-24 512 58)"/>
+    <ellipse cx="474" cy="96" rx="27" ry="14" fill="{P['mid']}" opacity=".68" transform="rotate(32 474 96)"/>
+    <text x="34" y="44" fill="{P['primary']}" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="700" letter-spacing="3">{label_text.upper()}</text>
+    <rect x="34" y="62" width="105" height="5" rx="3" fill="{P['accent']}" opacity=".75"/>
+  </svg>
+</div>"""
+
+
 # ─── Main renderer ────────────────────────────────────────────────────────────
 
 def render_pdf_html(structure: dict, page_count: int) -> str:
@@ -503,8 +546,7 @@ p, li, .body-text, .callout-italic, .timeline-step-desc, .stats-sub,
 }}
 
 /* Lists — avoid orphaned first/last items */
-ul, ol, .feature-cards, .stats-cards, .grid-tiles, .quote-pills,
-.stats-pills, .closing-takeaways, .manifesto-statements {{
+ul, ol, .quote-pills, .stats-pills, .closing-takeaways {{
   page-break-inside: avoid;
   break-inside: avoid;
 }}
@@ -522,6 +564,18 @@ h1 {{ font-family: Georgia, serif; font-weight: 700; letter-spacing: -0.03em; li
 h2 {{ font-family: Georgia, serif; font-weight: 700; letter-spacing: -0.02em; line-height: 1.10; }}
 h3 {{ font-family: Georgia, serif; font-weight: 700; line-height: 1.18; }}
 p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
+
+.visual-panel {{
+  width: 100%;
+  height: 34mm;
+  border-radius: 6mm;
+  overflow: hidden;
+  margin: 6mm 0 8mm;
+  border: 0.4mm solid var(--light);
+  page-break-inside: avoid;
+  break-inside: avoid;
+}}
+.visual-panel svg {{ width: 100%; height: 100%; display: block; }}
 
 .eyebrow {{
   font-family: 'Helvetica Neue', Arial, sans-serif;
@@ -544,11 +598,11 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
 }}
 .body-text {{
   font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 10.5pt; line-height: 1.78; color: var(--body);
+  font-size: 9.4pt; line-height: 1.52; color: var(--body);
 }}
 .callout-italic {{
   font-family: Georgia, serif; font-style: italic;
-  font-size: 11pt; line-height: 1.58; color: var(--primary);
+  font-size: 9.8pt; line-height: 1.42; color: var(--primary);
 }}
 
 /* ═══════════════════════════════════════════
@@ -608,22 +662,22 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
    SPLIT
    ═══════════════════════════════════════════ */
 .split {{
-  display: grid; grid-template-columns: 60% 40%;
   background: white;
+  padding: 16mm 20mm 22mm;
 }}
 .split-left {{
-  padding: 20mm 13mm 24mm 20mm;
-  display: flex; flex-direction: column;
+  padding: 0;
 }}
 .split-accent-bar {{
   width: 20mm; height: 1mm; background: var(--accent);
   border-radius: 1mm; margin-bottom: 9mm;
 }}
 .split-right {{
-  padding: 20mm 15mm 20mm 13mm;
-  display: flex; flex-direction: column;
+  padding: 8mm 9mm;
   background: linear-gradient(170deg, var(--primary) 0%, var(--dark) 100%);
   color: white;
+  border-radius: 6mm;
+  margin-top: 7mm;
 }}
 .split-hl-label {{
   font-family: 'Helvetica Neue', Arial, sans-serif;
@@ -635,20 +689,20 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
   border: 1px solid rgba(255,255,255,0.12);
   border-left: 3mm solid var(--muted);
   border-radius: 0 3mm 3mm 0;
-  padding: 5.5mm 7mm; margin-bottom: 4mm;
+  padding: 3.8mm 6mm; margin-bottom: 3mm;
 }}
 .split-card p {{
   font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 9.8pt; line-height: 1.55; color: rgba(255,255,255,0.90);
+  font-size: 8.8pt; line-height: 1.36; color: rgba(255,255,255,0.90);
 }}
 .split-num {{
-  margin-top: auto; font-size: 48pt; font-weight: 100;
+  font-size: 28pt; font-weight: 100;
   color: rgba(255,255,255,0.10); text-align: right; line-height: 1;
   letter-spacing: -0.06em;
 }}
 .split-blockquote {{
-  border-left: 3.5mm solid var(--accent); padding: 5.5mm 9mm;
-  background: var(--wash); border-radius: 0 4mm 4mm 0; margin-top: auto;
+  border-left: 3.5mm solid var(--accent); padding: 4.5mm 7mm;
+  background: var(--wash); border-radius: 0 4mm 4mm 0;
 }}
 
 /* ═══════════════════════════════════════════
@@ -656,7 +710,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
    ═══════════════════════════════════════════ */
 .feature {{
   background: linear-gradient(145deg, var(--wash) 0%, white 65%);
-  padding: 20mm 24mm 22mm;
+  padding: 16mm 20mm 22mm;
 }}
 .feature-ghost-num {{
   position: absolute; right: -8mm; bottom: -10mm;
@@ -667,22 +721,23 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
 .feature-inner {{ position: relative; z-index: 1; }}
 .feature-band {{
   background: linear-gradient(138deg, var(--primary), var(--card2), var(--accent));
-  border-radius: 7mm; padding: 12mm 16mm; margin-bottom: 12mm;
+  border-radius: 6mm; padding: 8mm 10mm; margin-bottom: 7mm;
   box-shadow: 0 4px 20px rgba(0,0,0,0.18);
 }}
-.feature-band h2 {{ font-size: 28pt; color: white; letter-spacing: -0.025em; }}
+.feature-band h2 {{ font-size: 22pt; color: white; letter-spacing: -0.015em; }}
 .feature-band-sub {{
   font-family: 'Helvetica Neue', Arial, sans-serif;
   font-size: 10pt; color: rgba(255,255,255,0.72); margin-top: 4mm;
   line-height: 1.5; font-weight: 300;
 }}
 .feature-cards {{
-  display: grid; gap: 5mm; margin-bottom: 11mm;
+  margin-bottom: 7mm;
 }}
 .feature-card {{
   background: white; border: 1.2px solid var(--light);
-  border-radius: 5mm; padding: 7mm 9mm;
-  border-top: 4mm solid var(--accent);
+  border-radius: 4mm; padding: 4mm 6mm;
+  border-left: 3mm solid var(--accent);
+  margin-bottom: 3mm;
   box-shadow: 0 2px 8px rgba(0,0,0,0.06);
 }}
 .feature-card-num {{
@@ -692,7 +747,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
 }}
 .feature-card p {{
   font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 9.5pt; line-height: 1.58; color: var(--text);
+  font-size: 8.8pt; line-height: 1.36; color: var(--text);
 }}
 .feature-callout-bar {{
   background: var(--light); border-radius: 4mm;
@@ -707,15 +762,16 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
    GRID
    ═══════════════════════════════════════════ */
 .grid-page {{
-  padding: 20mm 22mm 22mm; background: var(--wash);
+  padding: 16mm 20mm 22mm; background: var(--wash);
 }}
 .grid-tiles {{
-  display: grid; grid-template-columns: 1fr 1fr; gap: 5.5mm; margin-bottom: 9mm;
+  margin-bottom: 7mm;
 }}
 .grid-tile {{
-  background: white; border-radius: 5mm; padding: 9mm 10mm;
+  background: white; border-radius: 4mm; padding: 4.5mm 6mm;
   border: 1.2px solid var(--light);
-  border-top: 4.5mm solid var(--accent);
+  border-left: 3mm solid var(--accent);
+  margin-bottom: 3.2mm;
   box-shadow: 0 2px 10px rgba(0,0,0,0.05);
 }}
 .grid-tile-label {{
@@ -725,7 +781,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
 }}
 .grid-tile-val {{
   font-family: Georgia, serif;
-  font-size: 16pt; font-weight: 700; color: var(--primary); line-height: 1.25;
+  font-size: 12pt; font-weight: 700; color: var(--primary); line-height: 1.22;
 }}
 .grid-callout-bar {{
   background: linear-gradient(135deg, var(--primary), var(--accent));
@@ -737,8 +793,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
    ═══════════════════════════════════════════ */
 .quote-page {{
   background: linear-gradient(165deg, var(--dark) 0%, var(--primary) 50%, var(--dark) 100%);
-  padding: 26mm 28mm; color: white;
-  display: flex; flex-direction: column; justify-content: space-between;
+  padding: 20mm 24mm; color: white;
 }}
 .quote-deco-open {{
   position: absolute; top: 4mm; left: 10mm;
@@ -753,17 +808,17 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
 .quote-box {{
   background: rgba(255,255,255,0.07);
   border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 7mm; padding: 14mm 16mm; margin-bottom: 10mm;
+  border-radius: 6mm; padding: 8mm 10mm; margin-bottom: 8mm;
   border-left: 5mm solid var(--mid);
   position: relative; z-index: 1;
 }}
 .quote-box p {{
-  font-family: Georgia, serif; font-size: 21pt; font-weight: 600;
+  font-family: Georgia, serif; font-size: 16pt; font-weight: 600;
   line-height: 1.35; color: white; letter-spacing: -0.01em;
 }}
 .quote-body {{
   font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 10.5pt; line-height: 1.75; color: rgba(255,255,255,0.78);
+  font-size: 9.2pt; line-height: 1.52; color: rgba(255,255,255,0.78);
   max-width: 145mm; margin-bottom: 10mm; position: relative; z-index: 1;
 }}
 .quote-pills {{ display: flex; flex-wrap: wrap; gap: 3.5mm; margin-bottom: 9mm; position: relative; z-index: 1; }}
@@ -786,7 +841,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
    TIMELINE
    ═══════════════════════════════════════════ */
 .timeline-page {{
-  background: white; padding: 20mm 22mm 22mm;
+  background: white; padding: 16mm 20mm 22mm;
 }}
 .timeline-sidebar {{
   position: absolute; right: 0; top: 0; bottom: 0; width: 36mm;
@@ -806,7 +861,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
   display: flex; flex-direction: column; align-items: center; flex-shrink: 0;
 }}
 .timeline-circle {{
-  width: 17mm; height: 17mm; border-radius: 50%;
+  width: 12mm; height: 12mm; border-radius: 50%;
   background: linear-gradient(135deg, var(--primary), var(--accent));
   display: flex; align-items: center; justify-content: center;
   color: white; font-weight: 700; font-size: 10pt;
@@ -824,7 +879,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
 }}
 .timeline-step-desc {{
   font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 10pt; color: #4B5563; line-height: 1.60;
+  font-size: 8.9pt; color: #4B5563; line-height: 1.42;
 }}
 .timeline-callout {{
   background: var(--wash); border-radius: 5mm; padding: 7mm 11mm;
@@ -836,18 +891,19 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
    ═══════════════════════════════════════════ */
 .stats-page {{
   background: linear-gradient(145deg, var(--wash) 0%, white 100%);
-  padding: 20mm 22mm 22mm;
+  padding: 16mm 20mm 22mm;
 }}
 .stats-cards {{
-  display: grid; grid-template-columns: repeat(3,1fr); gap: 5.5mm; margin-bottom: 11mm;
+  margin-bottom: 7mm;
 }}
 .stats-card {{
   background: linear-gradient(148deg, var(--primary), var(--accent));
-  border-radius: 7mm; padding: 11mm 9mm; text-align: center; color: white;
+  border-radius: 5mm; padding: 5mm 7mm; text-align: left; color: white;
+  margin-bottom: 4mm;
   box-shadow: 0 4px 16px rgba(0,0,0,0.20);
 }}
 .stats-num {{
-  font-family: Georgia, serif; font-size: 40pt; font-weight: 700;
+  font-family: Georgia, serif; font-size: 23pt; font-weight: 700;
   line-height: 1; margin-bottom: 4mm; letter-spacing: -0.03em;
 }}
 .stats-label {{
@@ -857,7 +913,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
 }}
 .stats-sub {{
   font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 7.5pt; opacity: 0.65; line-height: 1.45;
+  font-size: 7.8pt; opacity: 0.72; line-height: 1.36;
 }}
 .stats-pills {{ display: flex; flex-wrap: wrap; gap: 3.5mm; margin-top: 9mm; }}
 .stats-pill {{
@@ -870,20 +926,18 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
    EDITORIAL
    ═══════════════════════════════════════════ */
 .editorial-page {{
-  background: white; padding: 0; display: grid;
-  grid-template-rows: auto 1fr auto;
+  background: white; padding: 0;
 }}
 .editorial-topband {{
   height: 3.5mm;
   background: linear-gradient(90deg, var(--primary) 0%, var(--accent) 55%, var(--mid) 100%);
 }}
 .editorial-body-grid {{
-  display: grid; grid-template-columns: 52% 48%;
-  padding: 17mm 20mm 0; gap: 14mm; align-items: start;
+  padding: 14mm 20mm 0;
 }}
 .editorial-left h2 {{
-  font-size: 32pt; color: var(--primary); line-height: 1.08;
-  margin-bottom: 9mm; letter-spacing: -0.025em;
+  font-size: 23pt; color: var(--primary); line-height: 1.08;
+  margin-bottom: 6mm; letter-spacing: -0.015em;
 }}
 .editorial-rule {{
   height: 0.8mm; width: 22mm; background: var(--accent);
@@ -894,39 +948,38 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
 }}
 .editorial-highlight-list li {{
   font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 10pt; color: var(--body); padding: 4.5mm 0;
-  border-bottom: 0.3mm solid var(--light); line-height: 1.55;
+  font-size: 8.8pt; color: var(--body); padding: 2.7mm 0;
+  border-bottom: 0.3mm solid var(--light); line-height: 1.34;
 }}
 .editorial-highlight-list li::before {{
   content: "→ "; color: var(--accent); font-weight: 700;
 }}
 .editorial-right .body-text {{ margin-bottom: 9mm; }}
 .editorial-callout-band {{
-  background: var(--primary); padding: 10mm 20mm;
-  margin-top: auto;
+  background: var(--primary); padding: 6mm 20mm;
+  margin-top: 7mm;
 }}
 .editorial-callout-band p {{
-  font-family: Georgia, serif; font-size: 13pt; font-style: italic;
-  color: white; line-height: 1.55;
+  font-family: Georgia, serif; font-size: 10pt; font-style: italic;
+  color: white; line-height: 1.35;
 }}
 
 /* ═══════════════════════════════════════════
    MANIFESTO
    ═══════════════════════════════════════════ */
 .manifesto-page {{
-  color: white; padding: 22mm 26mm;
-  display: flex; flex-direction: column; justify-content: center;
+  color: white; padding: 20mm 24mm;
 }}
 .manifesto-statements {{ margin-bottom: 13mm; }}
 .manifesto-statement {{
-  font-family: Georgia, serif; font-size: 21pt; font-weight: 700;
+  font-family: Georgia, serif; font-size: 16pt; font-weight: 700;
   line-height: 1.20; color: white; margin-bottom: 8mm;
   padding-bottom: 8mm; border-bottom: 0.3mm solid rgba(255,255,255,0.14);
 }}
 .manifesto-statement:last-child {{ border-bottom: none; margin-bottom: 0; }}
 .manifesto-body {{
   font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 10.5pt; line-height: 1.72; color: rgba(255,255,255,0.70);
+  font-size: 9pt; line-height: 1.48; color: rgba(255,255,255,0.70);
   max-width: 145mm; margin-bottom: 11mm;
 }}
 .manifesto-footer {{
@@ -960,7 +1013,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
 }}
 .closing-takeaway p {{
   font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 11pt; line-height: 1.60; color: var(--text);
+  font-size: 9.2pt; line-height: 1.42; color: var(--text);
 }}
 .closing-cta {{
   background: linear-gradient(138deg, var(--primary), var(--accent));
@@ -983,15 +1036,21 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
     for idx, page in enumerate(structure["pages"][:page_count], start=1):
         ptype      = str(page.get("type","split")).lower()
         eyebrow    = escape(str(page.get("eyebrow") or f"SECTION {idx}"))
-        heading    = escape(str(page.get("heading") or title))
-        body       = escape(str(page.get("body") or ""))
-        callout    = escape(str(page.get("callout") or ""))
-        highlights = [escape(str(h)) for h in (page.get("highlights") or [])[:5]]
+        body_limit = {
+            "split": 58, "feature": 56, "grid": 50, "quote": 46,
+            "timeline": 44, "stats": 38, "editorial": 46,
+            "manifesto": 40, "closing": 44,
+        }.get(ptype, 54)
+        heading    = escape(_clip_words(page.get("heading") or title, 12))
+        body       = escape(_clip_words(page.get("body") or "", body_limit))
+        callout    = escape(_clip_words(page.get("callout") or "", 24))
+        highlights = [escape(_clip_words(str(h), 15)) for h in (page.get("highlights") or [])[:4]]
         tiles      = page.get("tiles") or []
         steps      = page.get("steps") or []
         stats      = page.get("stats") or []
         takeaways  = page.get("takeaways") or []
         statements = page.get("statements") or []
+        visual     = _visual_panel(P, idx, heading)
 
         # ── COVER ──────────────────────────────────────────────────────────
         if ptype == "cover":
@@ -1026,6 +1085,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
     {_eyebrow(eyebrow, P['accent'])}
     <h2 style="font-size:26pt;color:{P['primary']};margin-bottom:6mm;">{heading}</h2>
     <div class="split-accent-bar"></div>
+    {visual}
     <p class="body-text" style="flex:1;margin-bottom:9mm;">{body}</p>
     <div class="split-blockquote">
       <p class="callout-italic">{callout}</p>
@@ -1058,7 +1118,8 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
       <p class="feature-band-sub">{callout}</p>
     </div>
     <p class="body-text" style="margin-bottom:10mm;max-width:155mm;">{body}</p>
-    <div class="feature-cards" style="grid-template-columns:repeat({n},1fr);">
+    {visual}
+    <div class="feature-cards">
       {cards}
     </div>
     <div class="feature-callout-bar">
@@ -1075,8 +1136,8 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
             tile_items = tiles[:4] or [{"label": "Key Point", "value": h} for h in highlights[:4]]
             tile_html = "".join(f"""
 <div class="grid-tile">
-  <div class="grid-tile-label">{escape(str(t.get('label','Key Fact')))}</div>
-  <div class="grid-tile-val">{escape(str(t.get('value','—')))}</div>
+  <div class="grid-tile-label">{escape(_clip_words(t.get('label','Key Fact'), 5))}</div>
+  <div class="grid-tile-val">{escape(_clip_words(t.get('value','-'), 12))}</div>
 </div>""" for t in tile_items)
             pages_html.append(f"""
 <section class="page grid-page">
@@ -1087,6 +1148,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
     <h2 style="font-size:27pt;color:{P['primary']};margin-bottom:5mm;">{heading}</h2>
     <div style="width:22mm;height:1mm;background:{P['accent']};border-radius:1mm;margin-bottom:7mm;"></div>
     <p class="body-text" style="margin-bottom:9mm;max-width:155mm;">{body}</p>
+    {visual}
     <div class="grid-tiles">{tile_html}</div>
     <div class="grid-callout-bar">
       <p style="font-family:Georgia,serif;font-size:11.5pt;font-style:italic;color:white;">{callout}</p>
@@ -1110,6 +1172,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
       <p>{callout}</p>
     </div>
     <p class="quote-body">{body}</p>
+    {visual}
   </div>
   <div style="position:relative;z-index:1;">
     <div class="quote-pills">{pills}</div>
@@ -1135,8 +1198,8 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
     {connector}
   </div>
   <div class="timeline-content">
-    <div class="timeline-step-label">{escape(str(s.get('step','')))}</div>
-    <p class="timeline-step-desc">{escape(str(s.get('desc','')))}</p>
+    <div class="timeline-step-label">{escape(_clip_words(s.get('step',''), 7))}</div>
+    <p class="timeline-step-desc">{escape(_clip_words(s.get('desc',''), 18))}</p>
   </div>
 </div>"""
             pages_html.append(f"""
@@ -1147,6 +1210,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
   <div class="timeline-inner">
     {_eyebrow(eyebrow, P['accent'])}
     <h2 style="font-size:26pt;color:{P['primary']};margin-bottom:6mm;">{heading}</h2>
+    {visual}
     <p class="body-text" style="margin-bottom:9mm;max-width:130mm;">{body}</p>
     {steps_html}
     <div class="timeline-callout">
@@ -1163,9 +1227,9 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
             ]
             stat_cards = "".join(f"""
 <div class="stats-card">
-  <div class="stats-num">{escape(str(s.get('number','—')))}</div>
-  <div class="stats-label">{escape(str(s.get('label','Metric')))}</div>
-  <div class="stats-sub">{escape(str(s.get('sub','')))}</div>
+  <div class="stats-num">{escape(_clip_chars(s.get('number','-'), 14))}</div>
+  <div class="stats-label">{escape(_clip_words(s.get('label','Metric'), 7))}</div>
+  <div class="stats-sub">{escape(_clip_words(s.get('sub',''), 16))}</div>
 </div>""" for s in stat_list)
             pills = "".join(f'<span class="stats-pill">{h}</span>' for h in highlights)
             pages_html.append(f"""
@@ -1175,6 +1239,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
   <div style="position:relative;z-index:1;">
     {_eyebrow(eyebrow, P['accent'])}
     <h2 style="font-size:27pt;color:{P['primary']};margin-bottom:11mm;">{heading}</h2>
+    {visual}
     <div class="stats-cards">{stat_cards}</div>
     <p class="body-text" style="max-width:152mm;margin-bottom:0;">{body}</p>
     <div class="stats-pills">{pills}</div>
@@ -1194,6 +1259,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
       {_eyebrow(eyebrow, P['accent'])}
       <div class="editorial-rule"></div>
       <h2>{heading}</h2>
+      {visual}
       <ul class="editorial-highlight-list">{hi_li}</ul>
     </div>
     <div class="editorial-right">
@@ -1213,7 +1279,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
         elif ptype == "manifesto":
             stmt_list = statements[:3] or [callout] + highlights[:2]
             stmts_html = "".join(
-                f'<div class="manifesto-statement">{escape(str(s))}</div>'
+                f'<div class="manifesto-statement">{escape(_clip_words(str(s), 14))}</div>'
                 for s in stmt_list
             )
             pages_html.append(f"""
@@ -1222,6 +1288,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
   {_svg_grid_dots('rgba(255,255,255,0.22)')}
   <div style="position:relative;z-index:1;">
     {_eyebrow(eyebrow, P['muted'], light=True)}
+    {visual}
     <div class="manifesto-statements">{stmts_html}</div>
     <p class="manifesto-body">{body}</p>
     <div class="manifesto-footer">
@@ -1246,6 +1313,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
   <div class="closing-inner" style="position:relative;z-index:1;">
     {_eyebrow(eyebrow, P['accent'])}
     <h2 style="font-size:30pt;color:{P['primary']};margin-bottom:9mm;">{heading}</h2>
+    {visual}
     <p class="body-text" style="margin-bottom:10mm;max-width:146mm;">{body}</p>
     <div style="background:white;border-radius:7mm;padding:11mm;
       border:1.5px solid {P['light']};margin-bottom:10mm;
@@ -1271,6 +1339,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
   {_eyebrow(eyebrow, P['accent'])}
   <h2 style="font-size:27pt;color:{P['primary']};margin-bottom:9mm;">{heading}</h2>
   <div style="width:20mm;height:1mm;background:{P['accent']};border-radius:1mm;margin-bottom:8mm;"></div>
+  {visual}
   <p class="body-text" style="margin-bottom:10mm;">{body}</p>
   <ul style="list-style:none;padding:0;margin-bottom:10mm;
     font-family:'Helvetica Neue',Arial,sans-serif;font-size:10.5pt;color:{P['text']};">{hi_li}</ul>
@@ -1290,7 +1359,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
         .split-card, .feature-card, .grid-tile, .stats-card, .timeline-step,
         .closing-takeaway, .quote-box, .manifesto-statement,
         .feature-callout-bar, .grid-callout-bar, .closing-cta,
-        .timeline-callout, .feature-cards, .stats-cards, .grid-tiles {
+        .timeline-callout, .visual-panel {
             page-break-inside: avoid;
         }
         h1, h2, h3, .eyebrow { page-break-after: avoid; }
