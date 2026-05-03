@@ -80,6 +80,29 @@ def _generation_error(exc: Exception):
     raise HTTPException(status_code=500, detail=_exception_detail(exc)) from exc
 
 
+def _enforce_no_consecutive_layouts(items, type_key="type",
+                                     interior_types=None,
+                                     pin_first=None, pin_last=None):
+    """Post-process AI output so no two consecutive items share the same layout."""
+    if not items or len(items) < 3:
+        return items
+    if interior_types is None:
+        interior_types = list({it.get(type_key, "") for it in items
+                              if it.get(type_key, "") not in (pin_first, pin_last, "")})
+    start = 1 if pin_first else 0
+    end = len(items) - 1 if pin_last else len(items)
+    for i in range(start, end):
+        curr = items[i].get(type_key, "")
+        prev = items[i - 1].get(type_key, "") if i > 0 else ""
+        if curr == prev:
+            nxt = items[i + 1].get(type_key, "") if i + 1 < len(items) else ""
+            for alt in interior_types:
+                if alt != prev and alt != nxt:
+                    items[i][type_key] = alt
+                    break
+    return items
+
+
 async def _deepinfra_call(messages: list, temperature: float = 0.4) -> str:
     if not DEEPINFRA_KEY:
         raise HTTPException(status_code=500, detail="DEEPINFRA_KEY is not configured on the Render document service")
@@ -238,7 +261,7 @@ RULES:
 - pages[0].type MUST be "cover"
 - pages[{page_count-1}].type MUST be "closing" if page_count > 2
 - Interior pages: vary types — mix editorial/manifesto/stats/timeline/grid/quote/split/feature
-- body: minimum 60 words of rich specific content
+- body: minimum 80 words of rich, specific, expert-level content
 - highlights: 3-4 items always
 - pages array MUST have exactly {page_count} items"""
 
@@ -260,6 +283,11 @@ RULES:
             "tiles": [], "steps": [], "stats": [], "takeaways": [], "statements": [],
         })
     data["pages"] = pages[:page_count]
+    _enforce_no_consecutive_layouts(
+        data["pages"], "type",
+        interior_types=INTERIOR_LAYOUTS,
+        pin_first="cover", pin_last="closing",
+    )
     return data
 
 
@@ -442,30 +470,65 @@ def _clip_chars(value: str, limit: int) -> str:
 
 
 def _visual_panel(P: dict, idx: int, label: str = "") -> str:
+    """Generate a decorative SVG visual panel, cycling through 6 distinct styles."""
     label_text = escape(_clip_chars(label or "Visual Brief", 42))
+    variant = (idx - 1) % 6
+    uid = f"vp{idx}"
+    hdr = (
+        f'<text x="34" y="44" fill="{P["primary"]}" font-family="Helvetica, Arial, sans-serif"'
+        f' font-size="17" font-weight="700" letter-spacing="3">{label_text.upper()}</text>'
+        f'<rect x="34" y="62" width="105" height="5" rx="3" fill="{P["accent"]}" opacity=".75"/>'
+    )
+    bg = f'<rect width="620" height="210" rx="22" fill="{P["wash"]}"/>'
+
+    if variant == 0:
+        grid = "".join(f'<line x1="60" y1="{y}" x2="560" y2="{y}" stroke="{P["light"]}" stroke-width=".5"/>' for y in (75, 115, 155))
+        art = (
+            f'<defs><linearGradient id="{uid}g" x1="0" y1="0" x2="0" y2="1">'
+            f'<stop offset="0%" stop-color="{P["accent"]}" stop-opacity=".30"/>'
+            f'<stop offset="100%" stop-color="{P["wash"]}" stop-opacity=".05"/></linearGradient></defs>'
+            f'{grid}'
+            f'<polygon points="80,172 140,140 200,154 260,110 320,124 380,80 440,98 500,58 560,74 560,200 80,200" fill="url(#{uid}g)"/>'
+            f'<polyline points="80,172 140,140 200,154 260,110 320,124 380,80 440,98 500,58 560,74" fill="none" stroke="{P["accent"]}" stroke-width="3" stroke-linejoin="round"/>'
+            + "".join(f'<circle cx="{x}" cy="{y}" r="4.5" fill="{P["primary"]}" stroke="white" stroke-width="1.5"/>' for x, y in [(140,140),(260,110),(380,80),(500,58),(560,74)])
+        )
+    elif variant == 1:
+        bars_data = [(90,120),(145,90),(200,140),(255,70),(310,105),(365,55),(420,85),(475,65),(530,95)]
+        bars = "".join(f'<rect x="{x}" y="{h}" width="38" height="{195-h}" rx="4" fill="{P["accent"] if i%2==0 else P["mid"]}" opacity=".{65+i*3}"/>' for i,(x,h) in enumerate(bars_data))
+        grid = "".join(f'<line x1="75" y1="{y}" x2="575" y2="{y}" stroke="{P["light"]}" stroke-width=".4"/>' for y in (80, 120, 160))
+        art = f'{grid}{bars}'
+    elif variant == 2:
+        rings = "".join(f'<circle cx="310" cy="115" r="{r}" fill="none" stroke="{P["accent"]}" stroke-width="{w}" opacity="{o}" stroke-dasharray="{d}"/>' for r,w,o,d in [(80,"10",".22","0"),(65,"12",".18","80 200"),(50,"8",".30","120 200"),(35,"6",".40","50 200")])
+        art = (f'{rings}<circle cx="310" cy="115" r="18" fill="{P["primary"]}" opacity=".75"/>'
+               f'<circle cx="310" cy="115" r="10" fill="white" opacity=".9"/>'
+               f'<circle cx="150" cy="150" r="22" fill="{P["mid"]}" opacity=".20"/>'
+               f'<circle cx="480" cy="80" r="30" fill="{P["accent"]}" opacity=".12"/>')
+    elif variant == 3:
+        pts = [(100,150,8),(160,100,11),(230,130,6),(290,70,13),(350,110,7),(420,60,10),(480,90,9),(540,50,6)]
+        circles = "".join(f'<circle cx="{x}" cy="{y}" r="{r}" fill="{P["accent"]}" opacity=".{35+i*7}"/>' for i,(x,y,r) in enumerate(pts))
+        lines = "".join(f'<line x1="{pts[i][0]}" y1="{pts[i][1]}" x2="{pts[i+1][0]}" y2="{pts[i+1][1]}" stroke="{P["mid"]}" stroke-width="1" opacity=".30"/>' for i in range(len(pts)-1))
+        art = f'{lines}{circles}'
+    elif variant == 4:
+        art = (
+            f'<defs><linearGradient id="{uid}w1" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="{P["accent"]}" stop-opacity=".25"/><stop offset="100%" stop-color="{P["mid"]}" stop-opacity=".15"/></linearGradient>'
+            f'<linearGradient id="{uid}w2" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="{P["mid"]}" stop-opacity=".18"/><stop offset="100%" stop-color="{P["soft"]}" stop-opacity=".10"/></linearGradient></defs>'
+            f'<path d="M0,160 C80,100 160,140 240,110 S400,80 480,120 S580,90 620,130 L620,210 L0,210 Z" fill="url(#{uid}w1)"/>'
+            f'<path d="M0,175 C100,130 200,170 300,140 S440,110 530,145 S600,120 620,155 L620,210 L0,210 Z" fill="url(#{uid}w2)"/>'
+            f'<path d="M0,140 C120,90 220,130 340,95 S480,70 560,105 L620,85" fill="none" stroke="{P["accent"]}" stroke-width="2.5" opacity=".55"/>'
+            f'<path d="M0,120 C150,80 280,115 400,75 S550,55 620,90" fill="none" stroke="{P["primary"]}" stroke-width="1.5" opacity=".30"/>')
+    else:
+        nodes = [(110,100,16),(220,60,12),(330,130,18),(430,70,14),(520,110,11),(280,170,10),(460,160,9)]
+        edges = [(0,1),(1,2),(2,3),(3,4),(0,2),(1,3),(2,5),(3,6),(4,6)]
+        lines = "".join(f'<line x1="{nodes[a][0]}" y1="{nodes[a][1]}" x2="{nodes[b][0]}" y2="{nodes[b][1]}" stroke="{P["mid"]}" stroke-width="1.2" opacity=".28"/>' for a,b in edges)
+        dots = "".join(f'<circle cx="{x}" cy="{y}" r="{r}" fill="{P["accent"] if i%2==0 else P["primary"]}" opacity=".{50+i*6}"/><circle cx="{x}" cy="{y}" r="{max(3,r-5)}" fill="white" opacity=".6"/>' for i,(x,y,r) in enumerate(nodes))
+        art = f'{lines}{dots}'
+
     return f"""
 <div class="visual-panel">
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 210" preserveAspectRatio="none">
-    <defs>
-      <linearGradient id="vp{idx}" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="{P['light']}"/>
-        <stop offset="58%" stop-color="{P['wash']}"/>
-        <stop offset="100%" stop-color="{P['soft']}"/>
-      </linearGradient>
-    </defs>
-    <rect width="620" height="210" rx="22" fill="url(#vp{idx})"/>
-    <circle cx="520" cy="55" r="95" fill="{P['accent']}" opacity=".15"/>
-    <circle cx="92" cy="184" r="78" fill="{P['mid']}" opacity=".16"/>
-    <path d="M95 158 C140 92, 198 82, 250 128 S365 160, 428 82 S540 45, 588 89" fill="none" stroke="{P['accent']}" stroke-width="5" opacity=".55"/>
-    <path d="M135 150 C150 112, 168 84, 196 58" fill="none" stroke="{P['primary']}" stroke-width="4" stroke-linecap="round"/>
-    <ellipse cx="206" cy="50" rx="34" ry="18" fill="{P['accent']}" opacity=".75" transform="rotate(-22 206 50)"/>
-    <ellipse cx="166" cy="86" rx="28" ry="15" fill="{P['mid']}" opacity=".70" transform="rotate(28 166 86)"/>
-    <ellipse cx="142" cy="126" rx="25" ry="13" fill="{P['primary']}" opacity=".42" transform="rotate(-35 142 126)"/>
-    <path d="M432 159 C445 121, 468 94, 502 66" fill="none" stroke="{P['primary']}" stroke-width="4" stroke-linecap="round"/>
-    <ellipse cx="512" cy="58" rx="31" ry="16" fill="{P['accent']}" opacity=".72" transform="rotate(-24 512 58)"/>
-    <ellipse cx="474" cy="96" rx="27" ry="14" fill="{P['mid']}" opacity=".68" transform="rotate(32 474 96)"/>
-    <text x="34" y="44" fill="{P['primary']}" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="700" letter-spacing="3">{label_text.upper()}</text>
-    <rect x="34" y="62" width="105" height="5" rx="3" fill="{P['accent']}" opacity=".75"/>
+    {bg}
+    {art}
+    {hdr}
   </svg>
 </div>"""
 
@@ -1037,14 +1100,14 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
         ptype      = str(page.get("type","split")).lower()
         eyebrow    = escape(str(page.get("eyebrow") or f"SECTION {idx}"))
         body_limit = {
-            "split": 58, "feature": 56, "grid": 50, "quote": 46,
-            "timeline": 44, "stats": 38, "editorial": 46,
-            "manifesto": 40, "closing": 44,
-        }.get(ptype, 54)
-        heading    = escape(_clip_words(page.get("heading") or title, 12))
+            "split": 72, "feature": 70, "grid": 62, "quote": 58,
+            "timeline": 56, "stats": 50, "editorial": 65,
+            "manifesto": 52, "closing": 56,
+        }.get(ptype, 68)
+        heading    = escape(_clip_words(page.get("heading") or title, 14))
         body       = escape(_clip_words(page.get("body") or "", body_limit))
-        callout    = escape(_clip_words(page.get("callout") or "", 24))
-        highlights = [escape(_clip_words(str(h), 15)) for h in (page.get("highlights") or [])[:4]]
+        callout    = escape(_clip_words(page.get("callout") or "", 30))
+        highlights = [escape(_clip_words(str(h), 20)) for h in (page.get("highlights") or [])[:4]]
         tiles      = page.get("tiles") or []
         steps      = page.get("steps") or []
         stats      = page.get("stats") or []
@@ -1461,6 +1524,11 @@ RULES:
                         "Strategic thinking drives every recommendation made here."]
         })
     data["slides"] = slides[:slide_count]
+    _enforce_no_consecutive_layouts(
+        data["slides"], "type",
+        interior_types=["bullets", "two_col", "stat", "quote", "image_text"],
+        pin_first="title", pin_last="closing",
+    )
     return data
 
 
@@ -1523,6 +1591,18 @@ def _add_bullets_textbox(slide, bullets, l, t, w, h, size=14, color=None, marker
         run.font.name = font
         if color:
             run.font.color.rgb = color
+
+
+def _pptx_decor(slide, pal, stype):
+    """Add subtle decorative corner accents to content slides."""
+    ACC = _rgb(pal["accent"])
+    CARD = _rgb(pal["card"])
+    if stype in ("bullets", "two_col", "image_text"):
+        corner = slide.shapes.add_shape(1, PPTXInches(12.4), PPTXInches(0), PPTXInches(0.93), PPTXInches(1.35))
+        _solid(corner, ACC)
+    elif stype in ("stat", "quote"):
+        circ = slide.shapes.add_shape(9, PPTXInches(-0.8), PPTXInches(5.5), PPTXInches(2.8), PPTXInches(2.8))
+        circ.fill.solid(); circ.fill.fore_color.rgb = CARD; circ.line.fill.background()
 
 
 @app.post("/docs/generate/pptx")
@@ -1600,7 +1680,9 @@ async def generate_pptx(payload: dict):
         elif stype == "bullets":
             _add_rect(slide, 0, 0, 13.33, 7.5, WHITE)
             _add_rect(slide, 0, 0, 13.33, 1.5, PRI)
-            _txt(slide, stitle, 0.5, 0.2, 12, 1.1, size=28, bold=True, color=WHITE, font="Calibri")
+            _pptx_decor(slide, pal, stype)
+            _txt(slide, f"0{si+1}  \u2022  {stitle.upper()[:40]}", 0.5, 0.08, 12, 0.35, size=9, bold=True, color=ACC, font="Calibri")
+            _txt(slide, stitle, 0.5, 0.35, 12, 1.1, size=28, bold=True, color=WHITE, font="Calibri")
             bullets = slide_data.get("bullets", [])
             _add_bullets_textbox(slide, bullets, 0.5, 1.8, 12.3, 5.3, size=15, color=PRI, marker="▸", font="Calibri")
             _add_rect(slide, 0, 7.2, 13.33, 0.3, ACC)
@@ -1609,7 +1691,9 @@ async def generate_pptx(payload: dict):
         elif stype == "two_col":
             _add_rect(slide, 0, 0, 13.33, 7.5, _rgb((0xF8,0xFA,0xFC)))
             _add_rect(slide, 0, 0, 13.33, 1.35, PRI)
-            _txt(slide, stitle, 0.45, 0.18, 12.4, 1.0, size=26, bold=True, color=WHITE, font="Calibri")
+            _pptx_decor(slide, pal, stype)
+            _txt(slide, f"0{si+1}  \u2022  COMPARISON", 0.45, 0.06, 12.4, 0.3, size=9, bold=True, color=ACC, font="Calibri")
+            _txt(slide, stitle, 0.45, 0.30, 12.4, 1.0, size=26, bold=True, color=WHITE, font="Calibri")
             lcard = slide.shapes.add_shape(1, PPTXInches(0.35), PPTXInches(1.55), PPTXInches(6.1), PPTXInches(5.65))
             _solid(lcard, WHITE)
             _add_rect(slide, 0.35, 1.55, 6.1, 0.18, ACC)
@@ -1625,8 +1709,10 @@ async def generate_pptx(payload: dict):
         elif stype == "stat":
             _add_rect(slide, 0, 0, 13.33, 7.5, BG)
             _add_rect(slide, 0, 0, 0.18, 7.5, ACC)
-            _txt(slide, stitle, 0.45, 0.3, 12.4, 1.0, size=30, bold=True, color=WHITE, font="Calibri")
-            _add_rect(slide, 0.45, 1.35, 8, 0.06, ACC)
+            _pptx_decor(slide, pal, stype)
+            _txt(slide, f"0{si+1}  \u2022  KEY METRICS", 0.45, 0.12, 12.4, 0.3, size=9, bold=True, color=ACC, font="Calibri")
+            _txt(slide, stitle, 0.45, 0.38, 12.4, 1.0, size=30, bold=True, color=WHITE, font="Calibri")
+            _add_rect(slide, 0.45, 1.42, 8, 0.06, ACC)
             stats_data = slide_data.get("stats", [])[:3]
             card_w, card_h = 3.9, 4.0
             starts = [0.45, 4.6, 8.75]
@@ -1891,12 +1977,14 @@ async def generate_docx(payload: dict):
     for si, sec in enumerate(structure.get("sections", [])):
         is_alt = (si % 2 == 1)
         h_bg  = ACC_HEX if is_alt else PRI_HEX
-        _add_docx_heading_band(doc, sec["heading"], h_bg, "#FFFFFF", level_pt=14)
+        section_label = f"{si+1:02d}  \u2014  {sec['heading']}"
+        _add_docx_heading_band(doc, section_label, h_bg, "#FFFFFF", level_pt=14)
 
         body_para = doc.add_paragraph(sec.get("body",""))
         body_para.paragraph_format.space_after  = Pt(10)
         body_para.paragraph_format.space_before = Pt(2)
         body_para.paragraph_format.left_indent  = Inches(0.1)
+        body_para.paragraph_format.line_spacing = Pt(16)
         for run in body_para.runs:
             run.font.size = Pt(11)
             run.font.color.rgb = BODY_RGB
@@ -1904,12 +1992,13 @@ async def generate_docx(payload: dict):
         if sec.get("callout"):
             _add_pull_quote(doc, sec["callout"], ACC_HEX)
 
-        for sub in sec.get("subsections", []):
+        for sub_idx, sub in enumerate(sec.get("subsections", [])):
             sub_para = doc.add_paragraph()
             sub_para.paragraph_format.space_before = Pt(10)
             sub_para.paragraph_format.space_after  = Pt(4)
             sub_para.paragraph_format.left_indent  = Inches(0.1)
-            sub_run = sub_para.add_run(sub["heading"])
+            sub_label = f"{si+1}.{sub_idx+1}  {sub['heading']}"
+            sub_run = sub_para.add_run(sub_label)
             sub_run.bold = True
             sub_run.font.size = Pt(12.5)
             sub_run.font.color.rgb = ACC_RGB
@@ -1917,11 +2006,24 @@ async def generate_docx(payload: dict):
             sub_body = doc.add_paragraph(sub.get("body",""))
             sub_body.paragraph_format.space_after = Pt(8)
             sub_body.paragraph_format.left_indent = Inches(0.2)
+            sub_body.paragraph_format.line_spacing = Pt(16)
             for run in sub_body.runs:
                 run.font.size = Pt(11)
                 run.font.color.rgb = BODY_RGB
 
-        doc.add_paragraph()
+        # Horizontal separator between sections
+        sep_para = doc.add_paragraph()
+        sep_para.paragraph_format.space_before = Pt(6)
+        sep_para.paragraph_format.space_after  = Pt(6)
+        pPr_sep = sep_para._p.get_or_add_pPr()
+        pBdr_sep = OxmlElement('w:pBdr')
+        bottom_sep = OxmlElement('w:bottom')
+        bottom_sep.set(qn('w:val'), 'single')
+        bottom_sep.set(qn('w:sz'), '4')
+        bottom_sep.set(qn('w:space'), '1')
+        bottom_sep.set(qn('w:color'), pal.get('light', '#E0E7FF').lstrip('#'))
+        pBdr_sep.append(bottom_sep)
+        pPr_sep.append(pBdr_sep)
 
     if structure.get("conclusion"):
         _add_docx_heading_band(doc, "Conclusion", PRI_HEX, "#FFFFFF", level_pt=14)
