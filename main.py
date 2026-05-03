@@ -247,8 +247,9 @@ For "closing": provide "takeaways": ["short takeaway"] (3-4 items)
 For "manifesto": provide "statements": ["Bold declarative sentence."] (3 statements)
 
 MANDATORY DATA REQUIREMENTS:
-1. You MUST include "chart_data": [["Label 1", 40], ["Label 2", 80], ["Label 3", 55]] (3-7 items) on AT LEAST TWO pages (e.g. stats, grid, feature) containing highly realistic statistical data for the topic.
-2. You MUST include an "image_keyword" (1-3 words, e.g. "deforestation trees", "solar panels") on AT LEAST TWO pages.
+1. You MUST include "chart_data": [["Label 1", 40], ["Label 2", 80]] (3-7 items) on EXACTLY TWO interior pages.
+2. You MUST include an "image_keyword" (e.g. "butterfly macro", "forest canopy") on EVERY SINGLE interior page that does NOT have chart_data.
+3. Never put both chart_data and image_keyword on the same page.
 
 JSON schema:
 {{
