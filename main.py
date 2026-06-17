@@ -882,7 +882,7 @@ def _premium_visual_html(page: dict, P: dict, idx: int, heading: str) -> str:
     if visual:
         return visual
     if image_data:
-        return f'<figure class="photo-plate"><img src="{image_data}" /><figcaption>{escape(_clip_chars(heading, 70))}</figcaption></figure>'
+        return f'<div class="photo-plate"><img src="{image_data}" alt="" /><div class="photo-caption">{escape(_clip_chars(heading, 70))}</div></div>'
     return f"""
 <div class="signal-map signal-{idx % 4}">
   <div></div><div></div><div></div><div></div><div></div>
@@ -977,1028 +977,7 @@ def _visual_panel(P: dict, idx: int, label: str = "") -> str:
 # ─── Main renderer ────────────────────────────────────────────────────────────
 
 def render_pdf_html(structure: dict, page_count: int) -> str:
-    P = _resolve_design_tokens(structure)
-
-    title    = escape(str(structure.get("title")    or "Report"))
-    subtitle = escape(str(structure.get("subtitle") or ""))
-    author   = escape(str(structure.get("author")   or ""))
-    aesthetic = structure.get("aesthetic_direction") or {}
-    aesthetic_label = escape(str(aesthetic.get("label") or aesthetic.get("name") or ""))
-    aesthetic_rationale = escape(str(aesthetic.get("rationale") or ""))
-    signature = escape(str(P.get("signature_element") or ""))
-    fonts_link = _google_fonts_link(P)
-
-    css_vars = f"""
-:root {{
-  --primary: {P['primary']};
-  --accent:  {P['accent']};
-  --mid:     {P['mid']};
-  --light:   {P['light']};
-  --wash:    {P['wash']};
-  --text:    {P['text']};
-  --dark:    {P['dark']};
-  --soft:    {P['soft']};
-  --body:    {P['body']};
-  --white:   {P['white']};
-  --card2:   {P['card2']};
-  --muted:   {P['muted']};
-  --font-display: '{P['h1_font']}', Georgia, serif;
-  --font-heading: '{P['h2_font']}', 'Helvetica Neue', sans-serif;
-  --font-body: '{P['body_font']}', 'Helvetica Neue', Arial, sans-serif;
-  --font-data: '{P['data_font']}', 'Courier New', monospace;
-
-  /* Typography Scale */
-  --text-xs: 7pt;   --text-sm: 8.5pt;  --text-base: 10pt;
-  --text-lg: 12pt;  --text-xl: 16pt;   --text-2xl: 22pt;
-  --text-3xl: 30pt; --text-4xl: 42pt;  --text-display: 58pt;
-  --leading-tight: 1.2; --leading-normal: 1.5; --leading-relaxed: 1.7;
-
-  /* 8-Point Spacing Grid */
-  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px;
-  --space-6:24px; --space-8:32px; --space-12:48px; --space-16:64px;
-
-  /* Shadow System */
-  --shadow-sm: 2px 2px 6px rgba(0,0,0,0.35);
-  --shadow-md: 4px 4px 14px rgba(0,0,0,0.45);
-  --shadow-lg: 6px 8px 24px rgba(0,0,0,0.55);
-  --shadow-card: 3px 3px 10px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.06);
-}}"""
-
-    global_css = f"""
-@page {{
-  size: A4;
-  margin: 0;
-  background: var(--white);
-}}
-
-/* @page Running Headers & Footers (applied to .page elements via running elements if needed, but weasyprint supports standard page box if we define it on the page) */
-@page :not(:first) {{
-  @top-center {{
-    content: string(chapter-name);
-    font-size: var(--text-xs);
-    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-    color: var(--muted);
-    border-bottom: 0.5pt solid var(--light);
-    padding-bottom: 4pt;
-    margin-top: 8mm;
-  }}
-}}
-
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
-html, body {{
-  font-family: var(--font-body);
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-  /* WEASYPRINT FIXES */
-  overflow-wrap: break-word;
-  word-break: break-word;
-  hyphens: auto;
-}}
-img {{ max-width: 100%; height: auto; display: block; }}
-h1, h2, h3, h4, h5, h6, .eyebrow {{
-  font-family: var(--font-heading);
-}}
-h1 {{ font-family: var(--font-display); }}
-code, pre, .data-table-wrap th, .data-table-wrap td {{
-  font-family: var(--font-data);
-}}
-
-{css_vars}
-
-/* ═══════════════════════════════════════════
-   PAGE BASE — WeasyPrint pagination control
-   ═══════════════════════════════════════════ */
-.page {{
-  width: 210mm;
-  height: 297mm;
-  break-after: page;
-  page-break-after: always;
-  position: relative;
-  overflow: hidden;
-}}
-.page:last-child {{
-  break-after: auto;
-  page-break-after: auto;
-}}
-
-/* ═══════════════════════════════════════════
-   GLOBAL ORPHAN / WIDOW / BREAK CONTROL
-   Prevents single lines stranded at top/bottom
-   ═══════════════════════════════════════════ */
-p, li, .body-text, .callout-italic, .timeline-step-desc, .stats-sub,
-.split-card p, .feature-card p, .grid-tile-val, .quote-body,
-.manifesto-body, .closing-takeaway p, .editorial-highlight-list li {{
-  orphans: 3;
-  widows: 3;
-}}
-
-/* Cards, tiles, steps — never break internally */
-.split-card, .feature-card, .grid-tile, .stats-card, .timeline-step,
-.closing-takeaway, .quote-box, .timeline-callout, .feature-callout-bar,
-.grid-callout-bar, .closing-cta, .manifesto-statement, .stats-pill,
-.quote-pill, .editorial-callout-band, .cover-bottom, .cover-inner {{
-  page-break-inside: avoid;
-  break-inside: avoid;
-}}
-
-/* Lists — avoid orphaned first/last items */
-ul, ol, .quote-pills, .stats-pills, .closing-takeaways {{
-  page-break-inside: avoid;
-  break-inside: avoid;
-}}
-
-/* Headings stay with following content */
-h1, h2, h3, .eyebrow {{
-  page-break-after: avoid;
-  break-after: avoid;
-}}
-
-/* ═══════════════════════════════════════════
-   TYPOGRAPHY
-   ═══════════════════════════════════════════ */
-h1 {{ font-family: var(--font-display); font-weight: 700; letter-spacing: -0.03em; line-height: 1.05; }}
-h2 {{ font-family: var(--font-display); font-weight: 700; letter-spacing: -0.02em; line-height: 1.10; }}
-h3 {{ font-family: var(--font-heading); font-weight: 700; line-height: 1.18; }}
-p  {{ font-family: var(--font-body); font-weight: 400; }}
-
-.visual-panel {{
-  width: 100%;
-  height: 34mm;
-  border-radius: 6mm;
-  overflow: hidden;
-  margin: 6mm 0 8mm;
-  border: 0.4mm solid var(--light);
-  page-break-inside: avoid;
-  break-inside: avoid;
-}}
-.visual-panel svg {{ width: 100%; height: 100%; display: block; }}
-
-.eyebrow {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 7pt; font-weight: 700; letter-spacing: 0.28em;
-  text-transform: uppercase; margin-bottom: 5mm;
-}}
-
-.footer {{
-  position: absolute; bottom: 10mm; left: 18mm; right: 18mm;
-  border-top: 0.25mm solid var(--light); padding-top: 3.5mm;
-  display: flex; justify-content: space-between; align-items: center;
-}}
-.footer-title {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 7pt; letter-spacing: 0.10em;
-}}
-.footer-pager {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  padding: 1.2mm 4.5mm; border-radius: 10mm; font-size: 7pt; font-weight: 700;
-}}
-.body-text {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 9.4pt; line-height: 1.52; color: var(--body);
-}}
-.callout-italic {{
-  font-family: Georgia, serif; font-style: italic;
-  font-size: 9.8pt; line-height: 1.42; color: var(--primary);
-}}
-
-/* ═══════════════════════════════════════════
-   COVER
-   ═══════════════════════════════════════════ */
-.cover {{
-  background: linear-gradient(148deg, var(--dark) 0%, var(--primary) 55%, var(--card2) 100%);
-  color: white;
-  display: flex; flex-direction: column; justify-content: space-between;
-}}
-.cover-inner {{
-  position: relative; z-index: 2;
-  padding: 24mm 28mm 0;
-}}
-.cover-label {{
-  display: inline-block;
-  background: rgba(255,255,255,0.13);
-  border: 1px solid rgba(255,255,255,0.20);
-  border-radius: 20mm; padding: 2mm 9mm;
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 7pt; letter-spacing: 0.26em; text-transform: uppercase;
-  margin-bottom: 13mm; color: rgba(255,255,255,0.85);
-}}
-.cover-title {{
-  font-size: 48pt; max-width: 150mm; margin-bottom: 9mm;
-  line-height: 1.02; letter-spacing: -0.04em;
-}}
-.cover-subtitle {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 13.5pt; line-height: 1.55; opacity: 0.82; max-width: 138mm;
-  font-weight: 300;
-}}
-.cover-bottom {{
-  position: relative; z-index: 2;
-  padding: 0 28mm 22mm;
-}}
-.cover-rule {{
-  height: 0.35mm; background: rgba(255,255,255,0.20); margin-bottom: 9mm;
-}}
-.cover-meta {{
-  display: flex; justify-content: space-between; align-items: flex-end;
-}}
-.cover-author {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 9pt; opacity: 0.58; margin-bottom: 2.5mm; letter-spacing: 0.04em;
-}}
-.cover-callout {{
-  font-family: Georgia, serif; font-size: 11pt; font-style: italic;
-  max-width: 108mm; line-height: 1.55; opacity: 0.88;
-}}
-.cover-aesthetic {{
-  display: inline-block;
-  background: rgba(255,255,255,0.10);
-  border: 1px solid rgba(255,255,255,0.22);
-  border-radius: 20mm; padding: 2.5mm 9mm;
-  font-family: var(--font-data); font-size: 6.5pt; letter-spacing: 0.20em;
-  text-transform: uppercase; margin-bottom: 6mm; color: rgba(255,255,255,0.80);
-}}
-.cover-rationale {{
-  font-family: var(--font-body); font-size: 9pt; line-height: 1.45;
-  opacity: 0.65; max-width: 130mm; margin-top: 5mm; font-style: italic;
-}}
-.cover-signature {{
-  font-family: var(--font-data); font-size: 7pt; letter-spacing: 0.14em;
-  text-transform: uppercase; opacity: 0.45; margin-top: 4mm;
-}}
-.cover-num {{
-  font-size: 64pt; font-weight: 200; opacity: 0.15; line-height: 1;
-  letter-spacing: -0.06em;
-}}
-
-/* ═══════════════════════════════════════════
-   SPLIT
-   ═══════════════════════════════════════════ */
-.split {{
-  background: white;
-  padding: 16mm 20mm 22mm;
-}}
-.split-left {{
-  padding: 0;
-}}
-.split-accent-bar {{
-  width: 20mm; height: 1mm; background: var(--accent);
-  border-radius: 1mm; margin-bottom: 9mm;
-}}
-.split-right {{
-  padding: 8mm 9mm;
-  background: linear-gradient(170deg, var(--primary) 0%, var(--dark) 100%);
-  color: white;
-  border-radius: 6mm;
-  margin-top: 7mm;
-}}
-.split-hl-label {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 7.5pt; font-weight: 700; letter-spacing: 0.22em;
-  text-transform: uppercase; color: var(--muted); margin-bottom: 9mm;
-}}
-.split-card {{
-  background: rgba(255,255,255,0.08);
-  border: 1px solid rgba(255,255,255,0.12);
-  border-left: 3mm solid var(--muted);
-  border-radius: 0 3mm 3mm 0;
-  padding: 3.8mm 6mm; margin-bottom: 3mm;
-}}
-.split-card p {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 8.8pt; line-height: 1.36; color: rgba(255,255,255,0.90);
-}}
-.split-num {{
-  font-size: 28pt; font-weight: 100;
-  color: rgba(255,255,255,0.10); text-align: right; line-height: 1;
-  letter-spacing: -0.06em;
-}}
-.split-blockquote {{
-  border-left: 3.5mm solid var(--accent); padding: 4.5mm 7mm;
-  background: var(--wash); border-radius: 0 4mm 4mm 0;
-}}
-
-/* ═══════════════════════════════════════════
-   FEATURE
-   ═══════════════════════════════════════════ */
-.feature {{
-  background: linear-gradient(145deg, var(--wash) 0%, white 65%);
-  padding: 16mm 20mm 22mm;
-}}
-.feature-ghost-num {{
-  position: absolute; right: -8mm; bottom: -10mm;
-  font-size: 220pt; font-weight: 900; color: var(--light);
-  line-height: 1; z-index: 0; opacity: 0.55;
-  font-family: Georgia, serif; letter-spacing: -0.08em;
-}}
-.feature-inner {{ position: relative; z-index: 1; }}
-.feature-band {{
-  background: linear-gradient(138deg, var(--primary), var(--card2), var(--accent));
-  border-radius: 6mm; padding: 8mm 10mm; margin-bottom: 7mm;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.18);
-}}
-.feature-band h2 {{ font-size: 22pt; color: white; letter-spacing: -0.015em; }}
-.feature-band-sub {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 10pt; color: rgba(255,255,255,0.72); margin-top: 4mm;
-  line-height: 1.5; font-weight: 300;
-}}
-.feature-cards {{
-  margin-bottom: 7mm;
-}}
-.feature-card {{
-  background: white; border: 1.2px solid var(--light);
-  border-radius: 4mm; padding: 4mm 6mm;
-  border-left: 3mm solid var(--accent);
-  margin-bottom: 3mm;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-}}
-.feature-card-num {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 7pt; font-weight: 700; letter-spacing: 0.18em;
-  color: var(--accent); text-transform: uppercase; margin-bottom: 2.5mm;
-}}
-.feature-card p {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 8.8pt; line-height: 1.36; color: var(--text);
-}}
-.feature-callout-bar {{
-  background: var(--light); border-radius: 4mm;
-  padding: 6.5mm 11mm; display: flex; align-items: center; gap: 6mm;
-}}
-.feature-callout-pip {{
-  width: 3mm; min-height: 10mm; background: var(--accent);
-  border-radius: 2mm; flex-shrink: 0;
-}}
-
-/* ═══════════════════════════════════════════
-   GRID
-   ═══════════════════════════════════════════ */
-.grid-page {{
-  padding: 16mm 20mm 22mm; background: var(--wash);
-}}
-.grid-tiles {{
-  margin-bottom: 7mm;
-}}
-.grid-tile {{
-  background: white; border-radius: 4mm; padding: 4.5mm 6mm;
-  border: 1.2px solid var(--light);
-  border-left: 3mm solid var(--accent);
-  margin-bottom: 3.2mm;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-}}
-.grid-tile-label {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 7pt; color: var(--mid); text-transform: uppercase;
-  letter-spacing: 0.16em; margin-bottom: 4mm; font-weight: 600;
-}}
-.grid-tile-val {{
-  font-family: Georgia, serif;
-  font-size: 12pt; font-weight: 700; color: var(--primary); line-height: 1.22;
-}}
-.grid-callout-bar {{
-  background: linear-gradient(135deg, var(--primary), var(--accent));
-  border-radius: 5mm; padding: 6.5mm 13mm; color: white;
-}}
-
-/* ═══════════════════════════════════════════
-   QUOTE
-   ═══════════════════════════════════════════ */
-.quote-page {{
-  background: linear-gradient(165deg, var(--dark) 0%, var(--primary) 50%, var(--dark) 100%);
-  padding: 20mm 24mm; color: white;
-}}
-.quote-deco-open {{
-  position: absolute; top: 4mm; left: 10mm;
-  font-size: 150pt; font-weight: 900; color: rgba(255,255,255,0.045);
-  line-height: 1; font-family: Georgia, serif; z-index: 0;
-}}
-.quote-deco-close {{
-  position: absolute; bottom: 18mm; right: 10mm;
-  font-size: 150pt; font-weight: 900; color: rgba(255,255,255,0.045);
-  line-height: 1; font-family: Georgia, serif; z-index: 0;
-}}
-.quote-box {{
-  background: rgba(255,255,255,0.07);
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 6mm; padding: 8mm 10mm; margin-bottom: 8mm;
-  border-left: 5mm solid var(--mid);
-  position: relative; z-index: 1;
-}}
-.quote-box p {{
-  font-family: Georgia, serif; font-size: 16pt; font-weight: 600;
-  line-height: 1.35; color: white; letter-spacing: -0.01em;
-}}
-.quote-body {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 9.2pt; line-height: 1.52; color: rgba(255,255,255,0.78);
-  max-width: 145mm; margin-bottom: 10mm; position: relative; z-index: 1;
-}}
-.quote-pills {{ display: flex; flex-wrap: wrap; gap: 3.5mm; margin-bottom: 9mm; position: relative; z-index: 1; }}
-.quote-pill {{
-  background: rgba(255,255,255,0.11);
-  border: 1px solid rgba(255,255,255,0.16);
-  border-radius: 20mm;
-  padding: 2mm 8mm; font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 8.5pt; color: white;
-}}
-.quote-footer {{
-  border-top: 1px solid rgba(255,255,255,0.15); padding-top: 5mm;
-  display: flex; justify-content: space-between;
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 7pt; color: rgba(255,255,255,0.40);
-  position: relative; z-index: 1;
-}}
-
-/* ═══════════════════════════════════════════
-   TIMELINE
-   ═══════════════════════════════════════════ */
-.timeline-page {{
-  background: white; padding: 16mm 20mm 22mm;
-}}
-.timeline-sidebar {{
-  position: absolute; right: 0; top: 0; bottom: 0; width: 36mm;
-  background: linear-gradient(180deg, var(--wash) 0%, var(--light) 100%);
-  z-index: 0;
-}}
-.timeline-sidebar-accent {{
-  position: absolute; right: 0; top: 0; bottom: 0; width: 4mm;
-  background: linear-gradient(180deg, var(--primary) 0%, var(--accent) 100%);
-  z-index: 0;
-}}
-.timeline-inner {{ position: relative; z-index: 1; max-width: 148mm; }}
-.timeline-step {{
-  display: flex; align-items: flex-start; gap: 7mm; margin-bottom: 0;
-}}
-.timeline-node {{
-  display: flex; flex-direction: column; align-items: center; flex-shrink: 0;
-}}
-.timeline-circle {{
-  width: 12mm; height: 12mm; border-radius: 50%;
-  background: linear-gradient(135deg, var(--primary), var(--accent));
-  display: flex; align-items: center; justify-content: center;
-  color: white; font-weight: 700; font-size: 10pt;
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.20);
-}}
-.timeline-connector {{
-  width: 0.6mm; height: 8mm; background: var(--light);
-  margin: 1mm 0 1mm 8.2mm;
-}}
-.timeline-content {{ padding-top: 2mm; flex: 1; }}
-.timeline-step-label {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-weight: 700; font-size: 11.5pt; color: var(--primary); margin-bottom: 2mm;
-}}
-.timeline-step-desc {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 8.9pt; color: #4B5563; line-height: 1.42;
-}}
-.timeline-callout {{
-  background: var(--wash); border-radius: 5mm; padding: 7mm 11mm;
-  border-left: 3.5mm solid var(--accent); margin-top: 9mm;
-}}
-
-/* ═══════════════════════════════════════════
-   STATS
-   ═══════════════════════════════════════════ */
-.stats-page {{
-  background: linear-gradient(145deg, var(--wash) 0%, white 100%);
-  padding: 16mm 20mm 22mm;
-}}
-.stats-cards {{
-  margin-bottom: 7mm;
-}}
-.stats-card {{
-  background: linear-gradient(148deg, var(--primary), var(--accent));
-  border-radius: 5mm; padding: 5mm 7mm; text-align: left; color: white;
-  margin-bottom: 4mm;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.20);
-}}
-.stats-num {{
-  font-family: Georgia, serif; font-size: 23pt; font-weight: 700;
-  line-height: 1; margin-bottom: 4mm; letter-spacing: -0.03em;
-}}
-.stats-label {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 8.5pt; opacity: 0.88; line-height: 1.45; margin-bottom: 3.5mm;
-  font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
-}}
-.stats-sub {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 7.8pt; opacity: 0.72; line-height: 1.36;
-}}
-.stats-pills {{ display: flex; flex-wrap: wrap; gap: 3.5mm; margin-top: 9mm; }}
-.stats-pill {{
-  background: var(--light); border-radius: 20mm; padding: 2.5mm 8mm;
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 9pt; color: var(--primary); font-weight: 500;
-}}
-
-/* ═══════════════════════════════════════════
-   EDITORIAL
-   ═══════════════════════════════════════════ */
-.editorial-page {{
-  background: white; padding: 0;
-}}
-.editorial-topband {{
-  height: 3.5mm;
-  background: linear-gradient(90deg, var(--primary) 0%, var(--accent) 55%, var(--mid) 100%);
-}}
-.editorial-body-grid {{
-  padding: 14mm 20mm 0;
-}}
-.editorial-left h2 {{
-  font-size: 23pt; color: var(--primary); line-height: 1.08;
-  margin-bottom: 6mm; letter-spacing: -0.015em;
-}}
-.editorial-rule {{
-  height: 0.8mm; width: 22mm; background: var(--accent);
-  border-radius: 1mm; margin-bottom: 8mm;
-}}
-.editorial-highlight-list {{
-  list-style: none; padding: 0; margin-top: 8mm;
-}}
-.editorial-highlight-list li {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 8.8pt; color: var(--body); padding: 2.7mm 0;
-  border-bottom: 0.3mm solid var(--light); line-height: 1.34;
-}}
-.editorial-highlight-list li::before {{
-  content: "→ "; color: var(--accent); font-weight: 700;
-}}
-.editorial-right .body-text {{ margin-bottom: 9mm; }}
-.editorial-callout-band {{
-  background: var(--primary); padding: 6mm 20mm;
-  margin-top: 7mm;
-}}
-.editorial-callout-band p {{
-  font-family: Georgia, serif; font-size: 10pt; font-style: italic;
-  color: white; line-height: 1.35;
-}}
-
-/* ═══════════════════════════════════════════
-   MANIFESTO
-   ═══════════════════════════════════════════ */
-.manifesto-page {{
-  color: white; padding: 20mm 24mm;
-}}
-.manifesto-statements {{ margin-bottom: 13mm; }}
-.manifesto-statement {{
-  font-family: Georgia, serif; font-size: 16pt; font-weight: 700;
-  line-height: 1.20; color: white; margin-bottom: 8mm;
-  padding-bottom: 8mm; border-bottom: 0.3mm solid rgba(255,255,255,0.14);
-}}
-.manifesto-statement:last-child {{ border-bottom: none; margin-bottom: 0; }}
-.manifesto-body {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 9pt; line-height: 1.48; color: rgba(255,255,255,0.70);
-  max-width: 145mm; margin-bottom: 11mm;
-}}
-.manifesto-footer {{
-  border-top: 0.3mm solid rgba(255,255,255,0.18); padding-top: 5mm;
-  display: flex; justify-content: space-between;
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 7pt; color: rgba(255,255,255,0.35);
-}}
-
-/* ═══════════════════════════════════════════
-   CLOSING
-   ═══════════════════════════════════════════ */
-.closing-page {{
-  background: linear-gradient(158deg, var(--wash) 0%, white 50%, var(--light) 100%);
-  padding: 0;
-}}
-.closing-topbar {{
-  height: 4.5mm;
-  background: linear-gradient(90deg, var(--primary) 0%, var(--accent) 60%, var(--mid) 100%);
-}}
-.closing-inner {{ padding: 15mm 24mm 24mm; }}
-.closing-takeaways {{ margin-bottom: 10mm; }}
-.closing-takeaway {{
-  display: flex; align-items: flex-start; margin-bottom: 5.5mm;
-}}
-.closing-dot {{
-  min-width: 7mm; height: 7mm; border-radius: 50%;
-  background: linear-gradient(135deg, var(--primary), var(--accent));
-  margin-right: 6mm; margin-top: 1.5mm; flex-shrink: 0;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.18);
-}}
-.closing-takeaway p {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 9.2pt; line-height: 1.42; color: var(--text);
-}}
-.closing-cta {{
-  background: linear-gradient(138deg, var(--primary), var(--accent));
-  border-radius: 6mm; padding: 9mm 14mm; color: white;
-  box-shadow: 0 4px 18px rgba(0,0,0,0.18);
-}}
-.closing-cta p {{
-  font-family: Georgia, serif; font-size: 13pt; font-style: italic;
-  line-height: 1.55;
-}}
-.closing-tk-header {{
-  font-family: 'Helvetica Neue', Arial, sans-serif;
-  font-size: 7.5pt; font-weight: 700; letter-spacing: 0.20em;
-  text-transform: uppercase; color: var(--accent); margin-bottom: 7mm;
-}}
-"""
-
-    pages_html = []
-
-    for idx, page in enumerate(structure["pages"][:page_count], start=1):
-        raw_type   = str(page.get("type","split")).lower()
-        ptype      = PDF_TYPE_TO_LAYOUT.get(raw_type, raw_type)
-        eyebrow    = escape(str(page.get("eyebrow") or f"SECTION {idx}"))
-        body_limit = {
-            "split": 72, "feature": 70, "grid": 62, "quote": 58,
-            "timeline": 56, "stats": 50, "editorial": 65,
-            "manifesto": 52, "closing": 56,
-        }.get(ptype, 68)
-        heading    = escape(_clip_words(page.get("heading") or title, 14))
-        body       = escape(_clip_words(page.get("body") or "", body_limit))
-        callout    = escape(_clip_words(page.get("callout") or "", 30))
-        attribution = escape(str(page.get("attribution") or ""))
-        highlights = [escape(_clip_words(str(h), 20)) for h in (page.get("highlights") or [])[:4]]
-        tiles      = page.get("tiles") or []
-        steps      = page.get("steps") or []
-        stats      = page.get("stats") or []
-        takeaways  = page.get("takeaways") or []
-        statements = page.get("statements") or []
-        chart_data = page.get("chart_data") or []
-        hero_stat  = page.get("hero_stat") or {}
-        data_table = page.get("data_table") or {}
-        image_data = page.get("image_data") or ""
-
-        visual = None
-        has_chart = chart_data and isinstance(chart_data, list) and len(chart_data) > 0 and len(chart_data[0]) >= 2
-        has_image = bool(image_data.strip())
-        has_hero = isinstance(hero_stat, dict) and bool(hero_stat.get("value") or hero_stat.get("number"))
-        has_table = isinstance(data_table, dict) and bool(data_table.get("rows"))
-
-        if has_hero:
-            visual = _generate_hero_stat_html(hero_stat, P)
-        elif has_table:
-            visual = _generate_data_table_html(data_table, P)
-        elif has_image:
-            visual = f"""<div class="visual-panel" style="padding:0; border:none;">
-  <img src="{image_data}" style="width:100%; height:100%; object-fit:cover; display:block;" />
-</div>"""
-        elif has_chart:
-            try:
-                valid_data = [(str(d[0]), float(d[1])) for d in chart_data[:8]]
-                if idx % 3 == 0:
-                    visual = _generate_svg_donut(
-                        [(lbl, val, P["accent"] if i % 2 == 0 else P["mid"]) for i, (lbl, val) in enumerate(valid_data)],
-                        title=heading,
-                    )
-                elif idx % 3 == 1:
-                    visual = _generate_svg_area_chart(valid_data, line_color=P["accent"], title=heading)
-                else:
-                    visual = _generate_svg_bar_chart(valid_data, bar_color=P["accent"], bg=P["primary"], title=heading)
-            except (ValueError, TypeError):
-                pass
-
-        if not visual:
-            visual = _visual_panel(P, idx, heading)
-
-        # ── COVER ──────────────────────────────────────────────────────────
-        if ptype == "cover":
-            aesthetic_badge = f'<div class="cover-aesthetic">{aesthetic_label}</div>' if aesthetic_label else ""
-            rationale_block = f'<p class="cover-rationale">{aesthetic_rationale}</p>' if aesthetic_rationale else ""
-            sig_block = f'<p class="cover-signature">Motif: {signature}</p>' if signature else ""
-            pages_html.append(f"""
-<section class="page cover">
-  {_svg_cover_geometric(P['primary'], P['accent'], P['mid'])}
-  {_svg_noise_overlay('rgba(255,255,255,0.8)')}
-  <div class="cover-inner">
-    {aesthetic_badge}
-    <div class="cover-label">{eyebrow}</div>
-    <h1 class="cover-title">{heading}</h1>
-    <p class="cover-subtitle">{subtitle}</p>
-    {rationale_block}
-    {sig_block}
-  </div>
-  <div class="cover-bottom">
-    <div class="cover-rule"></div>
-    <div class="cover-meta">
-      <div>
-        <p class="cover-author">{author}</p>
-        <p class="cover-callout">{callout}</p>
-      </div>
-      <div class="cover-num">01</div>
-    </div>
-  </div>
-</section>""")
-
-        # ── SPLIT ──────────────────────────────────────────────────────────
-        elif ptype == "split":
-            cards = "".join(f'<div class="split-card"><p>{h}</p></div>' for h in highlights)
-            pages_html.append(f"""
-<section class="page split">
-  {_svg_grid_dots(P['soft'])}
-  <div class="split-left">
-    {_eyebrow(eyebrow, P['accent'])}
-    <h2 style="font-size:26pt;color:{P['primary']};margin-bottom:6mm;">{heading}</h2>
-    <div class="split-accent-bar"></div>
-    {visual}
-    <p class="body-text" style="flex:1;margin-bottom:9mm;">{body}</p>
-    <div class="split-blockquote">
-      <p class="callout-italic">{callout}</p>
-    </div>
-    {_footer(title, idx, page_count, P['accent'], P['mid'])}
-  </div>
-  <div class="split-right">
-    <div class="split-hl-label">Key Highlights</div>
-    {cards}
-    <div class="split-num">{idx:02d}</div>
-  </div>
-</section>""")
-
-        # ── FEATURE ────────────────────────────────────────────────────────
-        elif ptype == "feature":
-            n = min(len(highlights), 3) or 3
-            cards = "".join(
-                f'<div class="feature-card"><div class="feature-card-num">0{i+1}</div><p>{h}</p></div>'
-                for i, h in enumerate(highlights[:3])
-            )
-            pages_html.append(f"""
-<section class="page feature">
-  {_svg_half_circle(P['accent'], 'right')}
-  {_svg_hexagons(P['light'])}
-  <div class="feature-ghost-num">{idx:02d}</div>
-  <div class="feature-inner">
-    {_eyebrow(eyebrow, P['accent'])}
-    <div class="feature-band">
-      <h2>{heading}</h2>
-      <p class="feature-band-sub">{callout}</p>
-    </div>
-    <p class="body-text" style="margin-bottom:10mm;max-width:155mm;">{body}</p>
-    {visual}
-    <div class="feature-cards">
-      {cards}
-    </div>
-    <div class="feature-callout-bar">
-      <div class="feature-callout-pip"></div>
-      <p style="font-family:Georgia,serif;font-size:11pt;font-weight:600;
-        color:{P['primary']};font-style:italic;">{callout}</p>
-    </div>
-  </div>
-  {_footer(title, idx, page_count, P['accent'], P['mid'])}
-</section>""")
-
-        # ── GRID ───────────────────────────────────────────────────────────
-        elif ptype == "grid":
-            tile_items = tiles[:4] or [{"label": "Key Point", "value": h} for h in highlights[:4]]
-            tile_html = "".join(f"""
-<div class="grid-tile">
-  <div class="grid-tile-label">{escape(_clip_words(t.get('label','Key Fact'), 5))}</div>
-  <div class="grid-tile-val">{escape(_clip_words(t.get('value','-'), 12))}</div>
-</div>""" for t in tile_items)
-            pages_html.append(f"""
-<section class="page grid-page">
-  {_svg_circles(P['accent'], P['light'], P['soft'])}
-  {_svg_diagonal_lines(P['mid'])}
-  <div style="position:relative;z-index:1;">
-    {_eyebrow(eyebrow, P['accent'])}
-    <h2 style="font-size:27pt;color:{P['primary']};margin-bottom:5mm;">{heading}</h2>
-    <div style="width:22mm;height:1mm;background:{P['accent']};border-radius:1mm;margin-bottom:7mm;"></div>
-    <p class="body-text" style="margin-bottom:9mm;max-width:155mm;">{body}</p>
-    {visual}
-    <div class="grid-tiles">{tile_html}</div>
-    <div class="grid-callout-bar">
-      <p style="font-family:Georgia,serif;font-size:11.5pt;font-style:italic;color:white;">{callout}</p>
-    </div>
-  </div>
-  {_footer(title, idx, page_count, P['accent'], P['mid'])}
-</section>""")
-
-        # ── QUOTE ──────────────────────────────────────────────────────────
-        elif ptype == "quote":
-            pills = "".join(f'<span class="quote-pill">{h}</span>' for h in highlights)
-            attrib_line = f'<p style="font-family:var(--font-body);font-size:10pt;color:{P["muted"]};margin-top:5mm;font-weight:600;">{attribution}</p>' if attribution else ""
-            pages_html.append(f"""
-<section class="page quote-page">
-  {_svg_arc_decoration(P['soft'])}
-  {_svg_noise_overlay('rgba(255,255,255,0.5)')}
-  <div class="quote-deco-open">\u201C</div>
-  <div class="quote-deco-close">\u201D</div>
-  <div style="position:relative;z-index:1;">
-    {_eyebrow(eyebrow, P['muted'], light=True)}
-    <div class="quote-box">
-      <p>{callout}</p>
-    </div>
-    {attrib_line}
-    <p class="quote-body">{body}</p>
-    {visual}
-  </div>
-  <div style="position:relative;z-index:1;">
-    <div class="quote-pills">{pills}</div>
-    <div class="quote-footer">
-      <span>{title}</span><span>{idx}&thinsp;/&thinsp;{page_count}</span>
-    </div>
-  </div>
-</section>""")
-
-        # ── TIMELINE ───────────────────────────────────────────────────────
-        elif ptype == "timeline":
-            step_list = steps[:4] or [
-                {"step": f"Phase {i+1}", "desc": highlights[i] if i < len(highlights) else "Key phase"}
-                for i in range(3)
-            ]
-            steps_html = ""
-            for si, s in enumerate(step_list):
-                connector = '<div class="timeline-connector"></div>' if si < len(step_list)-1 else ""
-                steps_html += f"""
-<div class="timeline-step">
-  <div class="timeline-node">
-    <div class="timeline-circle">{si+1}</div>
-    {connector}
-  </div>
-  <div class="timeline-content">
-    <div class="timeline-step-label">{escape(_clip_words(s.get('step',''), 7))}</div>
-    <p class="timeline-step-desc">{escape(_clip_words(s.get('desc',''), 18))}</p>
-  </div>
-</div>"""
-            pages_html.append(f"""
-<section class="page timeline-page">
-  <div class="timeline-sidebar"></div>
-  <div class="timeline-sidebar-accent"></div>
-  {_svg_cross_hatch(P['light'])}
-  <div class="timeline-inner">
-    {_eyebrow(eyebrow, P['accent'])}
-    <h2 style="font-size:26pt;color:{P['primary']};margin-bottom:6mm;">{heading}</h2>
-    {visual}
-    <p class="body-text" style="margin-bottom:9mm;max-width:130mm;">{body}</p>
-    {steps_html}
-    <div class="timeline-callout">
-      <p class="callout-italic">{callout}</p>
-    </div>
-  </div>
-  {_footer(title, idx, page_count, P['accent'], P['mid'])}
-</section>""")
-
-        # ── STATS ──────────────────────────────────────────────────────────
-        elif ptype == "stats":
-            stat_list = stats[:3] or [
-                {"number": "—", "label": h, "sub": ""} for h in highlights[:3]
-            ]
-            stat_cards = "".join(f"""
-<div class="stats-card">
-  <div class="stats-num">{escape(_clip_chars(s.get('number','-'), 14))}</div>
-  <div class="stats-label">{escape(_clip_words(s.get('label','Metric'), 7))}</div>
-  <div class="stats-sub">{escape(_clip_words(s.get('sub',''), 16))}</div>
-</div>""" for s in stat_list)
-            pills = "".join(f'<span class="stats-pill">{h}</span>' for h in highlights)
-            pages_html.append(f"""
-<section class="page stats-page">
-  {_svg_stripe_band(P['primary'], P['accent'])}
-  {_svg_arc_decoration(P['soft'])}
-  <div style="position:relative;z-index:1;">
-    {_eyebrow(eyebrow, P['accent'])}
-    <h2 style="font-size:27pt;color:{P['primary']};margin-bottom:11mm;">{heading}</h2>
-    {visual}
-    <div class="stats-cards">{stat_cards}</div>
-    <p class="body-text" style="max-width:152mm;margin-bottom:0;">{body}</p>
-    <div class="stats-pills">{pills}</div>
-  </div>
-  {_footer(title, idx, page_count, P['accent'], P['mid'])}
-</section>""")
-
-        # ── EDITORIAL ──────────────────────────────────────────────────────
-        elif ptype == "editorial":
-            hi_li = "".join(f'<li>{h}</li>' for h in highlights)
-            pages_html.append(f"""
-<section class="page editorial-page">
-  {_svg_half_circle(P['accent'], 'left')}
-  <div class="editorial-topband"></div>
-  <div class="editorial-body-grid" style="position:relative;z-index:1;">
-    <div class="editorial-left">
-      {_eyebrow(eyebrow, P['accent'])}
-      <div class="editorial-rule"></div>
-      <h2>{heading}</h2>
-      {visual}
-      <ul class="editorial-highlight-list">{hi_li}</ul>
-    </div>
-    <div class="editorial-right">
-      <p class="body-text">{body}</p>
-      <div style="background:{P['wash']};border-radius:5mm;padding:7mm 10mm;
-        border-left:3.5mm solid {P['accent']};">
-        <p class="callout-italic">{callout}</p>
-      </div>
-    </div>
-  </div>
-  <div class="editorial-callout-band" style="position:relative;z-index:1;">
-    <p>{title}&nbsp;&nbsp;·&nbsp;&nbsp;{eyebrow}&nbsp;&nbsp;·&nbsp;&nbsp;{idx}&thinsp;/&thinsp;{page_count}</p>
-  </div>
-</section>""")
-
-        # ── MANIFESTO ──────────────────────────────────────────────────────
-        elif ptype == "manifesto":
-            stmt_list = statements[:3] or [callout] + highlights[:2]
-            stmts_html = "".join(
-                f'<div class="manifesto-statement">{escape(_clip_words(str(s), 14))}</div>'
-                for s in stmt_list
-            )
-            pages_html.append(f"""
-<section class="page manifesto-page">
-  {_svg_manifesto_bg(P['dark'], P['accent'])}
-  {_svg_grid_dots('rgba(255,255,255,0.22)')}
-  <div style="position:relative;z-index:1;">
-    {_eyebrow(eyebrow, P['muted'], light=True)}
-    {visual}
-    <div class="manifesto-statements">{stmts_html}</div>
-    <p class="manifesto-body">{body}</p>
-    <div class="manifesto-footer">
-      <span>{title}</span><span>{idx}&thinsp;/&thinsp;{page_count}</span>
-    </div>
-  </div>
-</section>""")
-
-        # ── CLOSING ────────────────────────────────────────────────────────
-        elif ptype == "closing":
-            tk_list = takeaways[:4] or highlights[:4]
-            tk_html = "".join(f"""
-<div class="closing-takeaway">
-  <div class="closing-dot"></div>
-  <p>{escape(str(t))}</p>
-</div>""" for t in tk_list)
-            pages_html.append(f"""
-<section class="page closing-page">
-  {_svg_diagonal_band(P['light'], 0, 530, 595, 470, 595, 842, 0, 842)}
-  {_svg_arc_decoration(P['soft'])}
-  <div class="closing-topbar"></div>
-  <div class="closing-inner" style="position:relative;z-index:1;">
-    {_eyebrow(eyebrow, P['accent'])}
-    <h2 style="font-size:30pt;color:{P['primary']};margin-bottom:9mm;">{heading}</h2>
-    {visual}
-    <p class="body-text" style="margin-bottom:10mm;max-width:146mm;">{body}</p>
-    <div style="background:white;border-radius:7mm;padding:11mm;
-      border:1.5px solid {P['light']};margin-bottom:10mm;
-      box-shadow:0 2px 12px rgba(0,0,0,0.06);">
-      <div class="closing-tk-header">Key Takeaways</div>
-      <div class="closing-takeaways">{tk_html}</div>
-    </div>
-    <div class="closing-cta">
-      <p>{callout}</p>
-    </div>
-  </div>
-  {_footer(title, idx, page_count, P['accent'], P['mid'])}
-</section>""")
-
-        # ── FALLBACK ───────────────────────────────────────────────────────
-        else:
-            hi_li = "".join(
-                f'<li style="padding:4mm 0;border-bottom:0.3mm solid {P["light"]};">→ {h}</li>'
-                for h in highlights
-            )
-            pages_html.append(f"""
-<section class="page" style="background:white;padding:20mm 24mm;">
-  {_eyebrow(eyebrow, P['accent'])}
-  <h2 style="font-size:27pt;color:{P['primary']};margin-bottom:9mm;">{heading}</h2>
-  <div style="width:20mm;height:1mm;background:{P['accent']};border-radius:1mm;margin-bottom:8mm;"></div>
-  {visual}
-  <p class="body-text" style="margin-bottom:10mm;">{body}</p>
-  <ul style="list-style:none;padding:0;margin-bottom:10mm;
-    font-family:'Helvetica Neue',Arial,sans-serif;font-size:10.5pt;color:{P['text']};">{hi_li}</ul>
-  <blockquote style="border-left:4mm solid {P['accent']};padding:6mm 10mm;
-    background:{P['wash']};border-radius:0 5mm 5mm 0;">
-    <p class="callout-italic">{callout}</p>
-  </blockquote>
-  {_footer(title, idx, page_count, P['accent'], P['mid'])}
-</section>""")
-
-    # WeasyPrint: pass unbreakable CSS via the CSS object for robust pagination
-    pagination_css = CSS(string="""
-        @page { size: A4; margin: 0; }
-        .page { break-after: page; page-break-after: always; }
-        .page:last-child { break-after: auto; page-break-after: auto; }
-        p, li { orphans: 3; widows: 3; }
-        .split-card, .feature-card, .grid-tile, .stats-card, .timeline-step,
-        .closing-takeaway, .quote-box, .manifesto-statement,
-        .feature-callout-bar, .grid-callout-bar, .closing-cta,
-        .timeline-callout, .visual-panel {
-            page-break-inside: avoid;
-        }
-        h1, h2, h3, .eyebrow { page-break-after: avoid; }
-    """)
-
-    html_doc = f"""<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="utf-8"/>
-{fonts_link}
-<style>{global_css}</style>
-</head><body>{"".join(pages_html)}</body></html>"""
-
-    return html_doc, pagination_css
-
-
-def render_pdf_html(structure: dict, page_count: int) -> str:
-    """Premium editorial PDF renderer.
-
-    The older renderer remains above as a fallback reference, but this override is
-    what the API uses at runtime. It favors magazine pacing, strong data modules,
-    and natural-looking composition over repeated template cards.
-    """
+    """Premium editorial PDF renderer — WeasyPrint-safe (block/float/table only, no CSS Grid)."""
     P = _resolve_design_tokens(structure)
     title = escape(_clip_chars(structure.get("title") or "Report", 90))
     subtitle = escape(_clip_chars(structure.get("subtitle") or "", 155))
@@ -2006,7 +985,8 @@ def render_pdf_html(structure: dict, page_count: int) -> str:
     aesthetic = structure.get("aesthetic_direction") or {}
     aesthetic_label = escape(_clip_chars(aesthetic.get("label") or aesthetic.get("name") or "Editorial Intelligence", 42))
     signature = escape(_clip_chars(P.get("signature_element") or "calibrated signal line", 70))
-    fonts_link = _google_fonts_link(P)
+    # Skip external font CSS — WeasyPrint can mis-parse fetched stylesheets and trigger layout bugs.
+    fonts_link = ""
 
     css = f"""
 @page {{ size: A4; margin: 0; }}
@@ -2021,73 +1001,82 @@ html, body {{ margin:0; padding:0; font-family:var(--font-body); color:var(--tex
   --font-body:'{P['body_font']}', Arial, sans-serif;
   --font-data:'{P['data_font']}', 'Courier New', monospace;
 }}
-.page {{ width:210mm; height:297mm; page-break-after:always; break-after:page; position:relative; overflow:hidden; background:#fff; }}
+.page {{ width:210mm; height:297mm; page-break-after:always; break-after:page; position:relative; overflow:hidden; background:#fff; display:block; }}
 .page:last-child {{ page-break-after:auto; break-after:auto; }}
-.premium-backdrop {{ position:absolute; inset:0; width:210mm; height:297mm; z-index:0; }}
-.content {{ position:relative; z-index:1; }}
-.kicker {{ font-family:var(--font-data); font-size:7pt; letter-spacing:.22em; text-transform:uppercase; font-weight:800; color:var(--accent); }}
-h1,h2,h3 {{ margin:0; font-family:var(--font-display); letter-spacing:-.025em; line-height:1.02; }}
-p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; }}
-.folio {{ position:absolute; left:18mm; right:18mm; bottom:10mm; z-index:2; display:flex; justify-content:space-between; align-items:center; padding-top:3mm; border-top:.35mm solid rgba(0,0,0,.08); font:7pt var(--font-data); color:rgba(0,0,0,.48); letter-spacing:.08em; }}
+.premium-backdrop {{ position:absolute; inset:0; width:210mm; height:297mm; z-index:0; display:block; }}
+.content {{ position:relative; z-index:1; display:block; }}
+.kicker {{ font-family:var(--font-data); font-size:7pt; letter-spacing:.22em; text-transform:uppercase; font-weight:800; color:var(--accent); display:block; }}
+h1,h2,h3 {{ margin:0; font-family:var(--font-display); letter-spacing:-.025em; line-height:1.02; display:block; }}
+p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; display:block; }}
+.folio {{ position:absolute; left:18mm; right:18mm; bottom:10mm; z-index:2; display:block; overflow:hidden; padding-top:3mm; border-top:.35mm solid rgba(0,0,0,.08); font:7pt var(--font-data); color:rgba(0,0,0,.48); letter-spacing:.08em; }}
 .folio.dark {{ border-top-color:rgba(255,255,255,.18); color:rgba(255,255,255,.55); }}
-.folio b {{ color:var(--accent); font-size:8pt; }}
+.folio span {{ float:left; display:block; max-width:75%; }}
+.folio b {{ float:right; display:block; color:var(--accent); font-size:8pt; }}
 .cover {{ background:var(--dark); color:#fff; }}
-.cover .content {{ padding:24mm 26mm; height:100%; display:flex; flex-direction:column; justify-content:space-between; }}
-.cover-top {{ display:flex; gap:4mm; align-items:center; font:7pt var(--font-data); letter-spacing:.2em; text-transform:uppercase; color:rgba(255,255,255,.72); }}
-.cover-pill {{ border:1px solid rgba(255,255,255,.22); border-radius:999px; padding:2.2mm 7mm; background:rgba(255,255,255,.08); }}
+.cover .content {{ padding:24mm 26mm; height:249mm; position:relative; display:block; }}
+.cover-top {{ margin-bottom:10mm; display:block; }}
+.cover-pill {{ display:inline-block; border:1px solid rgba(255,255,255,.22); border-radius:999px; padding:2.2mm 7mm; background:rgba(255,255,255,.08); margin-right:4mm; font:7pt var(--font-data); letter-spacing:.2em; text-transform:uppercase; color:rgba(255,255,255,.72); vertical-align:middle; }}
+.cover-body {{ display:block; min-height:118mm; }}
 .cover h1 {{ max-width:156mm; font-size:55pt; color:#fff; }}
 .cover-sub {{ max-width:132mm; margin-top:8mm; color:rgba(255,255,255,.78); font-size:13.2pt; line-height:1.45; }}
 .cover-callout {{ max-width:122mm; color:rgba(255,255,255,.88); font:italic 14pt Georgia, serif; line-height:1.42; }}
-.cover-meta {{ display:flex; justify-content:space-between; align-items:flex-end; gap:12mm; }}
-.cover-num {{ font:800 74pt var(--font-data); color:rgba(255,255,255,.13); letter-spacing:-.08em; }}
-.spread {{ padding:17mm 18mm 24mm; }}
+.cover-meta {{ position:absolute; left:26mm; right:26mm; bottom:0; display:block; overflow:hidden; }}
+.cover-meta > div:first-child {{ float:left; max-width:calc(100% - 52mm); display:block; }}
+.cover-num {{ float:right; display:block; font:800 74pt var(--font-data); color:rgba(255,255,255,.13); letter-spacing:-.08em; line-height:1; }}
+.spread {{ padding:17mm 18mm 24mm; display:block; }}
 .spread h2 {{ font-size:31pt; color:var(--primary); max-width:162mm; margin:5mm 0 7mm; }}
 .lede {{ max-width:150mm; font-size:10.4pt; line-height:1.58; color:#334155; }}
-.editorial-grid {{ display:grid; grid-template-columns:1.1fr .82fr; gap:9mm; margin-top:9mm; align-items:start; }}
-.chapter {{ display:grid; grid-template-columns:31mm 1fr; gap:9mm; padding:18mm 19mm 24mm; }}
-.chapter-mark {{ font:800 31pt var(--font-data); color:var(--accent); letter-spacing:-.08em; border-top:1mm solid var(--accent); padding-top:5mm; }}
+.editorial-split {{ margin-top:9mm; display:block; overflow:hidden; }}
+.editorial-split .main-col {{ float:left; width:105mm; display:block; }}
+.editorial-split .side-col {{ float:right; width:70mm; display:block; }}
+.chapter {{ display:block; overflow:hidden; padding:18mm 19mm 24mm; }}
+.chapter-mark {{ float:left; width:31mm; margin-right:9mm; display:block; font:800 31pt var(--font-data); color:var(--accent); letter-spacing:-.08em; border-top:1mm solid var(--accent); padding-top:5mm; }}
+.chapter > .content {{ display:block; overflow:hidden; }}
 .chapter h2 {{ font-size:28pt; color:var(--primary); margin:4mm 0 7mm; }}
-.dark-page {{ background:var(--dark); color:#fff; padding:20mm 22mm 24mm; }}
+.dark-page {{ background:var(--dark); color:#fff; padding:20mm 22mm 24mm; display:block; }}
 .dark-page h2 {{ color:#fff; font-size:34pt; max-width:158mm; margin:6mm 0 9mm; }}
 .dark-page p {{ color:rgba(255,255,255,.74); }}
 .dark-page .kicker {{ color:var(--muted); }}
-.pullquote {{ margin-top:8mm; padding:7mm 0 7mm 8mm; border-left:1.4mm solid var(--accent); font:italic 15pt Georgia, serif; line-height:1.35; color:var(--primary); }}
+.pullquote {{ margin-top:8mm; padding:7mm 0 7mm 8mm; border-left:1.4mm solid var(--accent); font:italic 15pt Georgia, serif; line-height:1.35; color:var(--primary); display:block; }}
 .dark-page .pullquote {{ color:#fff; border-color:var(--accent); }}
-.insights {{ margin-top:7mm; display:grid; gap:3mm; }}
-.insight {{ display:flex; gap:3.5mm; align-items:flex-start; padding:3.8mm 0; border-top:.3mm solid rgba(0,0,0,.10); font-size:9.2pt; line-height:1.38; color:#334155; }}
-.insight:before {{ content:""; width:3mm; height:3mm; margin-top:1.2mm; border-radius:50%; background:var(--accent); flex:0 0 auto; }}
+.insights {{ margin-top:7mm; display:block; }}
+.insight {{ display:block; position:relative; padding:3.8mm 0 3.8mm 5.5mm; border-top:.3mm solid rgba(0,0,0,.10); font-size:9.2pt; line-height:1.38; color:#334155; }}
+.insight:before {{ content:""; position:absolute; left:0; top:5mm; width:3mm; height:3mm; border-radius:50%; background:var(--accent); }}
 .dark-page .insight {{ color:rgba(255,255,255,.76); border-color:rgba(255,255,255,.14); }}
-.premium-stat {{ background:linear-gradient(140deg,var(--primary),var(--card2) 58%,var(--accent)); color:#fff; padding:9mm; border-radius:3mm; box-shadow:0 10px 30px rgba(15,23,42,.20); }}
-.premium-stat-value {{ font:800 45pt var(--font-data); letter-spacing:-.05em; line-height:.94; }}
-.premium-stat-label {{ margin-top:4mm; font:800 8pt var(--font-data); letter-spacing:.16em; text-transform:uppercase; color:rgba(255,255,255,.78); }}
+.premium-stat {{ display:block; background:linear-gradient(140deg,var(--primary),var(--card2) 58%,var(--accent)); color:#fff; padding:9mm; border-radius:3mm; box-shadow:0 10px 30px rgba(15,23,42,.20); }}
+.premium-stat-value {{ display:block; font:800 45pt var(--font-data); letter-spacing:-.05em; line-height:.94; }}
+.premium-stat-label {{ display:block; margin-top:4mm; font:800 8pt var(--font-data); letter-spacing:.16em; text-transform:uppercase; color:rgba(255,255,255,.78); }}
 .premium-stat p {{ margin-top:4mm; color:rgba(255,255,255,.72); font-size:8.8pt; }}
-.premium-chart {{ background:#101114; color:#fff; padding:7mm; border-radius:3mm; box-shadow:0 10px 24px rgba(15,23,42,.18); }}
-.chart-kicker {{ font:800 8pt var(--font-data); letter-spacing:.13em; text-transform:uppercase; color:rgba(255,255,255,.75); margin-bottom:5mm; }}
-.chart-row {{ display:grid; grid-template-columns:32mm 1fr 15mm; gap:4mm; align-items:center; margin:3mm 0; }}
-.chart-label,.chart-value {{ font:7.5pt var(--font-data); color:rgba(255,255,255,.74); }}
-.chart-value {{ text-align:right; color:#fff; font-weight:800; }}
-.chart-track {{ height:4.4mm; background:rgba(255,255,255,.10); border-radius:999px; overflow:hidden; }}
-.chart-bar {{ height:100%; background:linear-gradient(90deg,var(--accent),var(--mid)); border-radius:999px; }}
-.premium-table {{ width:100%; border-collapse:collapse; overflow:hidden; border-radius:3mm; font-size:8.5pt; box-shadow:0 8px 22px rgba(15,23,42,.12); }}
-.premium-table th {{ background:#111; color:#fff; text-align:left; padding:3mm; font:800 7pt var(--font-data); letter-spacing:.08em; text-transform:uppercase; }}
-.premium-table td {{ padding:3.2mm; border-bottom:.25mm solid rgba(0,0,0,.07); color:#243042; }}
+.premium-chart {{ display:block; background:#101114; color:#fff; padding:7mm; border-radius:3mm; box-shadow:0 10px 24px rgba(15,23,42,.18); }}
+.chart-kicker {{ display:block; font:800 8pt var(--font-data); letter-spacing:.13em; text-transform:uppercase; color:rgba(255,255,255,.75); margin-bottom:5mm; }}
+.chart-row {{ display:table; width:100%; table-layout:fixed; margin:3mm 0; border-collapse:separate; border-spacing:0; }}
+.chart-label {{ display:table-cell; width:32mm; vertical-align:middle; padding-right:2mm; font:7.5pt var(--font-data); color:rgba(255,255,255,.74); }}
+.chart-track {{ display:table-cell; vertical-align:middle; height:4.4mm; background:rgba(255,255,255,.10); border-radius:999px; overflow:hidden; }}
+.chart-value {{ display:table-cell; width:15mm; vertical-align:middle; text-align:right; font:7.5pt var(--font-data); color:#fff; font-weight:800; }}
+.chart-bar {{ display:block; height:4.4mm; background:linear-gradient(90deg,var(--accent),var(--mid)); border-radius:999px; }}
+.premium-table {{ display:table; width:100%; border-collapse:collapse; overflow:hidden; border-radius:3mm; font-size:8.5pt; box-shadow:0 8px 22px rgba(15,23,42,.12); }}
+.premium-table thead {{ display:table-header-group; }}
+.premium-table tbody {{ display:table-row-group; }}
+.premium-table tr {{ display:table-row; }}
+.premium-table th {{ display:table-cell; background:#111; color:#fff; text-align:left; padding:3mm; font:800 7pt var(--font-data); letter-spacing:.08em; text-transform:uppercase; }}
+.premium-table td {{ display:table-cell; padding:3.2mm; border-bottom:.25mm solid rgba(0,0,0,.07); color:#243042; }}
 .premium-table tr:nth-child(even) td {{ background:rgba(0,0,0,.035); }}
-.photo-plate {{ margin:0; border-radius:3mm; overflow:hidden; position:relative; min-height:63mm; box-shadow:0 12px 34px rgba(15,23,42,.22); background:#111; }}
+.photo-plate {{ display:block; margin:0; border-radius:3mm; overflow:hidden; position:relative; min-height:63mm; box-shadow:0 12px 34px rgba(15,23,42,.22); background:#111; }}
 .photo-plate img {{ width:100%; height:72mm; object-fit:cover; display:block; }}
 .photo-plate:after {{ content:""; position:absolute; inset:0; background:linear-gradient(180deg,transparent 52%,rgba(0,0,0,.48)); }}
-.photo-plate figcaption {{ position:absolute; left:5mm; right:5mm; bottom:4mm; z-index:2; color:#fff; font:7pt var(--font-data); letter-spacing:.12em; text-transform:uppercase; }}
-.signal-map {{ height:72mm; position:relative; border-radius:3mm; overflow:hidden; background:radial-gradient(circle at 75% 22%,var(--accent),transparent 24%), linear-gradient(135deg,var(--primary),var(--card2)); box-shadow:0 12px 34px rgba(15,23,42,.18); }}
-.signal-map div {{ position:absolute; border:1px solid rgba(255,255,255,.24); border-radius:50%; }}
+.photo-caption {{ position:absolute; left:5mm; right:5mm; bottom:4mm; z-index:2; color:#fff; font:7pt var(--font-data); letter-spacing:.12em; text-transform:uppercase; display:block; }}
+.signal-map {{ display:block; height:72mm; position:relative; border-radius:3mm; overflow:hidden; background:radial-gradient(circle at 75% 22%,var(--accent),transparent 24%), linear-gradient(135deg,var(--primary),var(--card2)); box-shadow:0 12px 34px rgba(15,23,42,.18); }}
+.signal-map div {{ position:absolute; border:1px solid rgba(255,255,255,.24); border-radius:50%; display:block; }}
 .signal-map div:nth-child(1) {{ width:55mm;height:55mm;right:-10mm;top:-9mm; }}
 .signal-map div:nth-child(2) {{ width:82mm;height:82mm;left:-18mm;bottom:-22mm; }}
 .signal-map div:nth-child(3) {{ width:34mm;height:34mm;left:48mm;top:18mm; }}
 .signal-map div:nth-child(4) {{ width:115mm;height:1px;left:8mm;top:48mm;border-radius:0;background:rgba(255,255,255,.18); }}
 .signal-map div:nth-child(5) {{ width:1px;height:62mm;right:26mm;top:5mm;border-radius:0;background:rgba(255,255,255,.18); }}
-.signal-map span {{ position:absolute; left:7mm; bottom:6mm; color:#fff; font:800 9pt var(--font-data); letter-spacing:.13em; text-transform:uppercase; max-width:98mm; }}
-.tile-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:4mm; margin-top:8mm; }}
-.tile {{ min-height:38mm; padding:5mm; background:#fff; border:.35mm solid rgba(0,0,0,.08); border-top:1.2mm solid var(--accent); box-shadow:0 8px 20px rgba(15,23,42,.08); }}
+.signal-map span {{ position:absolute; left:7mm; bottom:6mm; color:#fff; font:800 9pt var(--font-data); letter-spacing:.13em; text-transform:uppercase; max-width:98mm; display:block; }}
+.tile-row {{ margin-top:8mm; display:block; overflow:hidden; }}
+.tile {{ float:left; width:31mm; min-height:38mm; margin:0 4mm 4mm 0; padding:5mm; display:block; background:#fff; border:.35mm solid rgba(0,0,0,.08); border-top:1.2mm solid var(--accent); box-shadow:0 8px 20px rgba(15,23,42,.08); }}
 .tile b {{ display:block; color:var(--primary); font:800 7pt var(--font-data); letter-spacing:.14em; text-transform:uppercase; margin-bottom:3mm; }}
-.tile span {{ color:#334155; font:10pt var(--font-body); line-height:1.38; }}
+.tile span {{ display:block; color:#334155; font:10pt var(--font-body); line-height:1.38; }}
 .closing h2 {{ font-size:42pt; }}
 """
 
@@ -2110,7 +1099,7 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; }}
   {_premium_svg_backdrop(P, idx, dark=True)}
   <div class="content">
     <div class="cover-top"><span class="cover-pill">{aesthetic_label}</span><span class="cover-pill">{eyebrow}</span></div>
-    <div><h1>{heading_html}</h1><p class="cover-sub">{subtitle}</p></div>
+    <div class="cover-body"><h1>{heading_html}</h1><p class="cover-sub">{subtitle}</p></div>
     <div class="cover-meta"><div><p class="cover-callout">{callout}</p><p style="margin-top:7mm;color:rgba(255,255,255,.52);font:7pt var(--font-data);letter-spacing:.16em;text-transform:uppercase;">{author} / motif: {signature}</p></div><div class="cover-num">01</div></div>
   </div>
 </section>""")
@@ -2122,9 +1111,9 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; }}
   <div class="content">
     <div class="kicker">{eyebrow}</div>
     <h2>{heading_html}</h2>
-    <div class="editorial-grid">
-      <div><p>{body}</p><div class="pullquote">{callout}</div><div class="insights">{insights}</div></div>
-      <div>{visual}</div>
+    <div class="editorial-split">
+      <div class="main-col"><p>{body}</p><div class="pullquote">{callout}</div><div class="insights">{insights}</div></div>
+      <div class="side-col">{visual}</div>
     </div>
   </div>
   <div class="folio dark"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
@@ -2138,9 +1127,9 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; }}
   <div class="content">
     <div class="kicker">{eyebrow}</div>
     <h2>{heading_html}</h2>
-    <div class="editorial-grid">
-      <div><p class="lede">{body}</p><div class="pullquote">{callout}</div><div class="tile-grid">{tiles}</div></div>
-      <div>{visual}</div>
+    <div class="editorial-split">
+      <div class="main-col"><p class="lede">{body}</p><div class="pullquote">{callout}</div><div class="tile-row">{tiles}</div></div>
+      <div class="side-col">{visual}</div>
     </div>
   </div>
   <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
@@ -2156,7 +1145,7 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; }}
     <div class="kicker">{eyebrow}</div>
     <h2>{heading_html}</h2>
     <p class="lede">{body}</p>
-    <div class="editorial-grid"><div>{visual}</div><div><div class="tile-grid">{tiles}</div><div class="pullquote">{callout}</div></div></div>
+    <div class="editorial-split"><div class="main-col">{visual}</div><div class="side-col"><div class="tile-row">{tiles}</div><div class="pullquote">{callout}</div></div></div>
   </div>
   <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
 </section>""")
@@ -2170,8 +1159,8 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; }}
   <div class="content">
     <div class="kicker">{eyebrow}</div>
     <h2>{heading_html}</h2>
-    <div class="editorial-grid"><div><p>{body}</p><div class="pullquote">{callout}</div></div><div>{visual}</div></div>
-    <div class="tile-grid">{step_tiles}</div>
+    <div class="editorial-split"><div class="main-col"><p>{body}</p><div class="pullquote">{callout}</div></div><div class="side-col">{visual}</div></div>
+    <div class="tile-row">{step_tiles}</div>
   </div>
   <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
 </section>""")
@@ -2184,7 +1173,7 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; }}
   <div class="content">
     <div class="kicker">{eyebrow}</div>
     <h2>{heading_html}</h2>
-    <div class="editorial-grid"><div><p>{body}</p><div class="pullquote">{callout}</div><div class="insights">{insights}</div></div><div>{visual}</div></div>
+    <div class="editorial-split"><div class="main-col"><p>{body}</p><div class="pullquote">{callout}</div><div class="insights">{insights}</div></div><div class="side-col">{visual}</div></div>
   </div>
   <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
 </section>""")
