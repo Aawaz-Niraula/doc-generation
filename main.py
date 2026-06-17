@@ -280,6 +280,12 @@ EVERY {unit_label.upper()} MUST include at least ONE of:
 - chart_data (real numbers), hero_stat (single powerful stat), data_table (styled table),
   or shape_motif (describe SVG/geometric composition reinforcing the topic)
 
+VISUAL STANDARD:
+- Prefer data-native visuals, editorial geometry, and topic-specific diagrams over fake-looking AI photos.
+- Use image_keyword only when a real-world visual materially helps the topic; never request fake people,
+  fake screenshots, fake logos, fake UI, or readable text inside an image.
+- Visuals must look intentionally art-directed, not like a generic AI template.
+
 CONTENT STRUCTURE for {unit_count} {unit_label}s (adapt if count differs — preserve order):
 1. COVER — cinematic, aesthetic fully declared
 2. CONTEXT/OVERVIEW — stakes via data viz, not bullets
@@ -513,7 +519,7 @@ async def _prefetch_images(structure: dict):
         for page in structure.get("pages", []):
             kw = page.get("image_keyword")
             if kw and str(kw).strip():
-                encoded_kw = urllib.parse.quote(str(kw).strip() + " photorealistic high quality")
+                encoded_kw = urllib.parse.quote(str(kw).strip() + " documentary editorial photograph, natural lighting, no text, no logo, high quality")
                 url = f"https://image.pollinations.ai/prompt/{encoded_kw}?width=800&height=400&nologo=true"
                 tasks.append(_fetch_single_image(client, url, page))
         if tasks:
@@ -796,6 +802,112 @@ def _clip_chars(value: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rsplit(" ", 1)[0].rstrip(".,;:") + "."
+
+
+def _safe_chart_data(chart_data: list, limit: int = 7) -> list:
+    values = []
+    if not isinstance(chart_data, list):
+        return values
+    for item in chart_data[:limit]:
+        try:
+            label, val = item[0], float(item[1])
+            values.append((str(label), val))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return values
+
+
+def _premium_chart_html(data: list, P: dict, title: str = "") -> str:
+    data = _safe_chart_data(data)
+    if not data:
+        return ""
+    max_val = max((v for _, v in data), default=1) or 1
+    rows = []
+    for label, val in data:
+        width = max(5, min(100, (val / max_val) * 100))
+        rows.append(f"""
+<div class="chart-row">
+  <div class="chart-label">{escape(_clip_chars(label, 24))}</div>
+  <div class="chart-track"><div class="chart-bar" style="width:{width:.1f}%"></div></div>
+  <div class="chart-value">{escape(f'{val:g}')}</div>
+</div>""")
+    return f"""
+<div class="premium-chart">
+  <div class="chart-kicker">{escape(_clip_chars(title or 'Measured Signal', 36))}</div>
+  {"".join(rows)}
+</div>"""
+
+
+def _premium_stat_html(stat: dict, P: dict) -> str:
+    if not isinstance(stat, dict) or not (stat.get("value") or stat.get("number")):
+        return ""
+    return f"""
+<div class="premium-stat">
+  <div class="premium-stat-value">{escape(str(stat.get("value") or stat.get("number")))}</div>
+  <div class="premium-stat-label">{escape(_clip_chars(stat.get("label") or "Key metric", 42))}</div>
+  <p>{escape(_clip_words(stat.get("context") or stat.get("sub") or "", 22))}</p>
+</div>"""
+
+
+def _premium_table_html(table: dict, P: dict) -> str:
+    if not isinstance(table, dict):
+        return ""
+    headers = table.get("headers") or []
+    rows = table.get("rows") or []
+    if not headers or not rows:
+        return ""
+    hdr = "".join(f"<th>{escape(_clip_chars(h, 22))}</th>" for h in headers[:5])
+    body = ""
+    for row in rows[:6]:
+        cells = "".join(
+            f"<td>{escape(_clip_chars(c, 32))}</td>"
+            for c in (list(row) + [""] * len(headers))[:len(headers[:5])]
+        )
+        body += f"<tr>{cells}</tr>"
+    return f'<table class="premium-table"><thead><tr>{hdr}</tr></thead><tbody>{body}</tbody></table>'
+
+
+def _premium_visual_html(page: dict, P: dict, idx: int, heading: str) -> str:
+    hero = page.get("hero_stat") or {}
+    table = page.get("data_table") or {}
+    chart = page.get("chart_data") or []
+    image_data = str(page.get("image_data") or "").strip()
+    visual = _premium_stat_html(hero, P)
+    if visual:
+        return visual
+    visual = _premium_table_html(table, P)
+    if visual:
+        return visual
+    visual = _premium_chart_html(chart, P, heading)
+    if visual:
+        return visual
+    if image_data:
+        return f'<figure class="photo-plate"><img src="{image_data}" /><figcaption>{escape(_clip_chars(heading, 70))}</figcaption></figure>'
+    return f"""
+<div class="signal-map signal-{idx % 4}">
+  <div></div><div></div><div></div><div></div><div></div>
+  <span>{escape(_clip_chars(heading, 44))}</span>
+</div>"""
+
+
+def _premium_svg_backdrop(P: dict, idx: int, dark: bool = False) -> str:
+    ink = "rgba(255,255,255,.42)" if dark else P["primary"]
+    accent = P["accent"]
+    return f"""
+<svg class="premium-backdrop" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 595 842" preserveAspectRatio="none">
+  <defs>
+    <linearGradient id="premiumGrad{idx}" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="{P['primary']}" stop-opacity="{'.95' if dark else '.07'}"/>
+      <stop offset="62%" stop-color="{P['card2']}" stop-opacity="{'.80' if dark else '.03'}"/>
+      <stop offset="100%" stop-color="{accent}" stop-opacity="{'.55' if dark else '.11'}"/>
+    </linearGradient>
+  </defs>
+  <rect width="595" height="842" fill="url(#premiumGrad{idx})"/>
+  <path d="M-40 720 C130 590 220 735 380 592 C492 492 548 552 650 414" fill="none" stroke="{accent}" stroke-width="2.5" opacity=".35"/>
+  <path d="M-50 112 C120 168 206 52 360 118 C485 172 535 112 650 42" fill="none" stroke="{ink}" stroke-width=".8" opacity=".18"/>
+  <circle cx="512" cy="118" r="168" fill="none" stroke="{accent}" stroke-width="1" opacity=".18"/>
+  <circle cx="78" cy="752" r="236" fill="{accent}" opacity="{'.10' if dark else '.055'}"/>
+</svg>"""
 
 
 def _visual_panel(P: dict, idx: int, label: str = "") -> str:
@@ -1877,6 +1989,215 @@ p  {{ font-family: var(--font-body); font-weight: 400; }}
 <style>{global_css}</style>
 </head><body>{"".join(pages_html)}</body></html>"""
 
+    return html_doc, pagination_css
+
+
+def render_pdf_html(structure: dict, page_count: int) -> str:
+    """Premium editorial PDF renderer.
+
+    The older renderer remains above as a fallback reference, but this override is
+    what the API uses at runtime. It favors magazine pacing, strong data modules,
+    and natural-looking composition over repeated template cards.
+    """
+    P = _resolve_design_tokens(structure)
+    title = escape(_clip_chars(structure.get("title") or "Report", 90))
+    subtitle = escape(_clip_chars(structure.get("subtitle") or "", 155))
+    author = escape(_clip_chars(structure.get("author") or "Prepared by AI Document Service", 90))
+    aesthetic = structure.get("aesthetic_direction") or {}
+    aesthetic_label = escape(_clip_chars(aesthetic.get("label") or aesthetic.get("name") or "Editorial Intelligence", 42))
+    signature = escape(_clip_chars(P.get("signature_element") or "calibrated signal line", 70))
+    fonts_link = _google_fonts_link(P)
+
+    css = f"""
+@page {{ size: A4; margin: 0; }}
+* {{ box-sizing: border-box; }}
+html, body {{ margin:0; padding:0; font-family:var(--font-body); color:var(--text); }}
+:root {{
+  --primary:{P['primary']}; --accent:{P['accent']}; --mid:{P['mid']}; --light:{P['light']};
+  --wash:{P['wash']}; --text:{P['text']}; --dark:{P['dark']}; --body:{P['body']};
+  --card2:{P['card2']}; --muted:{P['muted']};
+  --font-display:'{P['h1_font']}', Georgia, serif;
+  --font-heading:'{P['h2_font']}', Arial, sans-serif;
+  --font-body:'{P['body_font']}', Arial, sans-serif;
+  --font-data:'{P['data_font']}', 'Courier New', monospace;
+}}
+.page {{ width:210mm; height:297mm; page-break-after:always; break-after:page; position:relative; overflow:hidden; background:#fff; }}
+.page:last-child {{ page-break-after:auto; break-after:auto; }}
+.premium-backdrop {{ position:absolute; inset:0; width:210mm; height:297mm; z-index:0; }}
+.content {{ position:relative; z-index:1; }}
+.kicker {{ font-family:var(--font-data); font-size:7pt; letter-spacing:.22em; text-transform:uppercase; font-weight:800; color:var(--accent); }}
+h1,h2,h3 {{ margin:0; font-family:var(--font-display); letter-spacing:-.025em; line-height:1.02; }}
+p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; }}
+.folio {{ position:absolute; left:18mm; right:18mm; bottom:10mm; z-index:2; display:flex; justify-content:space-between; align-items:center; padding-top:3mm; border-top:.35mm solid rgba(0,0,0,.08); font:7pt var(--font-data); color:rgba(0,0,0,.48); letter-spacing:.08em; }}
+.folio.dark {{ border-top-color:rgba(255,255,255,.18); color:rgba(255,255,255,.55); }}
+.folio b {{ color:var(--accent); font-size:8pt; }}
+.cover {{ background:var(--dark); color:#fff; }}
+.cover .content {{ padding:24mm 26mm; height:100%; display:flex; flex-direction:column; justify-content:space-between; }}
+.cover-top {{ display:flex; gap:4mm; align-items:center; font:7pt var(--font-data); letter-spacing:.2em; text-transform:uppercase; color:rgba(255,255,255,.72); }}
+.cover-pill {{ border:1px solid rgba(255,255,255,.22); border-radius:999px; padding:2.2mm 7mm; background:rgba(255,255,255,.08); }}
+.cover h1 {{ max-width:156mm; font-size:55pt; color:#fff; }}
+.cover-sub {{ max-width:132mm; margin-top:8mm; color:rgba(255,255,255,.78); font-size:13.2pt; line-height:1.45; }}
+.cover-callout {{ max-width:122mm; color:rgba(255,255,255,.88); font:italic 14pt Georgia, serif; line-height:1.42; }}
+.cover-meta {{ display:flex; justify-content:space-between; align-items:flex-end; gap:12mm; }}
+.cover-num {{ font:800 74pt var(--font-data); color:rgba(255,255,255,.13); letter-spacing:-.08em; }}
+.spread {{ padding:17mm 18mm 24mm; }}
+.spread h2 {{ font-size:31pt; color:var(--primary); max-width:162mm; margin:5mm 0 7mm; }}
+.lede {{ max-width:150mm; font-size:10.4pt; line-height:1.58; color:#334155; }}
+.editorial-grid {{ display:grid; grid-template-columns:1.1fr .82fr; gap:9mm; margin-top:9mm; align-items:start; }}
+.chapter {{ display:grid; grid-template-columns:31mm 1fr; gap:9mm; padding:18mm 19mm 24mm; }}
+.chapter-mark {{ font:800 31pt var(--font-data); color:var(--accent); letter-spacing:-.08em; border-top:1mm solid var(--accent); padding-top:5mm; }}
+.chapter h2 {{ font-size:28pt; color:var(--primary); margin:4mm 0 7mm; }}
+.dark-page {{ background:var(--dark); color:#fff; padding:20mm 22mm 24mm; }}
+.dark-page h2 {{ color:#fff; font-size:34pt; max-width:158mm; margin:6mm 0 9mm; }}
+.dark-page p {{ color:rgba(255,255,255,.74); }}
+.dark-page .kicker {{ color:var(--muted); }}
+.pullquote {{ margin-top:8mm; padding:7mm 0 7mm 8mm; border-left:1.4mm solid var(--accent); font:italic 15pt Georgia, serif; line-height:1.35; color:var(--primary); }}
+.dark-page .pullquote {{ color:#fff; border-color:var(--accent); }}
+.insights {{ margin-top:7mm; display:grid; gap:3mm; }}
+.insight {{ display:flex; gap:3.5mm; align-items:flex-start; padding:3.8mm 0; border-top:.3mm solid rgba(0,0,0,.10); font-size:9.2pt; line-height:1.38; color:#334155; }}
+.insight:before {{ content:""; width:3mm; height:3mm; margin-top:1.2mm; border-radius:50%; background:var(--accent); flex:0 0 auto; }}
+.dark-page .insight {{ color:rgba(255,255,255,.76); border-color:rgba(255,255,255,.14); }}
+.premium-stat {{ background:linear-gradient(140deg,var(--primary),var(--card2) 58%,var(--accent)); color:#fff; padding:9mm; border-radius:3mm; box-shadow:0 10px 30px rgba(15,23,42,.20); }}
+.premium-stat-value {{ font:800 45pt var(--font-data); letter-spacing:-.05em; line-height:.94; }}
+.premium-stat-label {{ margin-top:4mm; font:800 8pt var(--font-data); letter-spacing:.16em; text-transform:uppercase; color:rgba(255,255,255,.78); }}
+.premium-stat p {{ margin-top:4mm; color:rgba(255,255,255,.72); font-size:8.8pt; }}
+.premium-chart {{ background:#101114; color:#fff; padding:7mm; border-radius:3mm; box-shadow:0 10px 24px rgba(15,23,42,.18); }}
+.chart-kicker {{ font:800 8pt var(--font-data); letter-spacing:.13em; text-transform:uppercase; color:rgba(255,255,255,.75); margin-bottom:5mm; }}
+.chart-row {{ display:grid; grid-template-columns:32mm 1fr 15mm; gap:4mm; align-items:center; margin:3mm 0; }}
+.chart-label,.chart-value {{ font:7.5pt var(--font-data); color:rgba(255,255,255,.74); }}
+.chart-value {{ text-align:right; color:#fff; font-weight:800; }}
+.chart-track {{ height:4.4mm; background:rgba(255,255,255,.10); border-radius:999px; overflow:hidden; }}
+.chart-bar {{ height:100%; background:linear-gradient(90deg,var(--accent),var(--mid)); border-radius:999px; }}
+.premium-table {{ width:100%; border-collapse:collapse; overflow:hidden; border-radius:3mm; font-size:8.5pt; box-shadow:0 8px 22px rgba(15,23,42,.12); }}
+.premium-table th {{ background:#111; color:#fff; text-align:left; padding:3mm; font:800 7pt var(--font-data); letter-spacing:.08em; text-transform:uppercase; }}
+.premium-table td {{ padding:3.2mm; border-bottom:.25mm solid rgba(0,0,0,.07); color:#243042; }}
+.premium-table tr:nth-child(even) td {{ background:rgba(0,0,0,.035); }}
+.photo-plate {{ margin:0; border-radius:3mm; overflow:hidden; position:relative; min-height:63mm; box-shadow:0 12px 34px rgba(15,23,42,.22); background:#111; }}
+.photo-plate img {{ width:100%; height:72mm; object-fit:cover; display:block; }}
+.photo-plate:after {{ content:""; position:absolute; inset:0; background:linear-gradient(180deg,transparent 52%,rgba(0,0,0,.48)); }}
+.photo-plate figcaption {{ position:absolute; left:5mm; right:5mm; bottom:4mm; z-index:2; color:#fff; font:7pt var(--font-data); letter-spacing:.12em; text-transform:uppercase; }}
+.signal-map {{ height:72mm; position:relative; border-radius:3mm; overflow:hidden; background:radial-gradient(circle at 75% 22%,var(--accent),transparent 24%), linear-gradient(135deg,var(--primary),var(--card2)); box-shadow:0 12px 34px rgba(15,23,42,.18); }}
+.signal-map div {{ position:absolute; border:1px solid rgba(255,255,255,.24); border-radius:50%; }}
+.signal-map div:nth-child(1) {{ width:55mm;height:55mm;right:-10mm;top:-9mm; }}
+.signal-map div:nth-child(2) {{ width:82mm;height:82mm;left:-18mm;bottom:-22mm; }}
+.signal-map div:nth-child(3) {{ width:34mm;height:34mm;left:48mm;top:18mm; }}
+.signal-map div:nth-child(4) {{ width:115mm;height:1px;left:8mm;top:48mm;border-radius:0;background:rgba(255,255,255,.18); }}
+.signal-map div:nth-child(5) {{ width:1px;height:62mm;right:26mm;top:5mm;border-radius:0;background:rgba(255,255,255,.18); }}
+.signal-map span {{ position:absolute; left:7mm; bottom:6mm; color:#fff; font:800 9pt var(--font-data); letter-spacing:.13em; text-transform:uppercase; max-width:98mm; }}
+.tile-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:4mm; margin-top:8mm; }}
+.tile {{ min-height:38mm; padding:5mm; background:#fff; border:.35mm solid rgba(0,0,0,.08); border-top:1.2mm solid var(--accent); box-shadow:0 8px 20px rgba(15,23,42,.08); }}
+.tile b {{ display:block; color:var(--primary); font:800 7pt var(--font-data); letter-spacing:.14em; text-transform:uppercase; margin-bottom:3mm; }}
+.tile span {{ color:#334155; font:10pt var(--font-body); line-height:1.38; }}
+.closing h2 {{ font-size:42pt; }}
+"""
+
+    pages = []
+    source_pages = structure.get("pages", [])[:page_count]
+    for idx, page in enumerate(source_pages, 1):
+        ptype = PDF_TYPE_TO_LAYOUT.get(str(page.get("type", "")).lower(), str(page.get("type", "")).lower())
+        eyebrow = escape(_clip_chars(page.get("eyebrow") or f"Section {idx}", 44))
+        heading = _clip_words(page.get("heading") or structure.get("title") or "Key Insight", 13)
+        heading_html = escape(heading)
+        body = escape(_clip_words(page.get("body") or "", 92 if idx in (1, page_count) else 78))
+        callout = escape(_clip_words(page.get("callout") or "", 30))
+        highlights = [escape(_clip_words(h, 16)) for h in (page.get("highlights") or [])[:4]]
+        visual = _premium_visual_html(page, P, idx, heading)
+        dark = ptype in ("cover", "quote", "manifesto")
+
+        if ptype == "cover":
+            pages.append(f"""
+<section class="page cover">
+  {_premium_svg_backdrop(P, idx, dark=True)}
+  <div class="content">
+    <div class="cover-top"><span class="cover-pill">{aesthetic_label}</span><span class="cover-pill">{eyebrow}</span></div>
+    <div><h1>{heading_html}</h1><p class="cover-sub">{subtitle}</p></div>
+    <div class="cover-meta"><div><p class="cover-callout">{callout}</p><p style="margin-top:7mm;color:rgba(255,255,255,.52);font:7pt var(--font-data);letter-spacing:.16em;text-transform:uppercase;">{author} / motif: {signature}</p></div><div class="cover-num">01</div></div>
+  </div>
+</section>""")
+        elif ptype in ("quote", "manifesto"):
+            insights = "".join(f'<div class="insight">{h}</div>' for h in highlights)
+            pages.append(f"""
+<section class="page dark-page">
+  {_premium_svg_backdrop(P, idx, dark=True)}
+  <div class="content">
+    <div class="kicker">{eyebrow}</div>
+    <h2>{heading_html}</h2>
+    <div class="editorial-grid">
+      <div><p>{body}</p><div class="pullquote">{callout}</div><div class="insights">{insights}</div></div>
+      <div>{visual}</div>
+    </div>
+  </div>
+  <div class="folio dark"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
+</section>""")
+        elif ptype == "closing":
+            takeaways = page.get("takeaways") or page.get("highlights") or []
+            tiles = "".join(f'<div class="tile"><b>{i+1:02d}</b><span>{escape(_clip_words(t, 16))}</span></div>' for i, t in enumerate(takeaways[:4]))
+            pages.append(f"""
+<section class="page spread closing">
+  {_premium_svg_backdrop(P, idx)}
+  <div class="content">
+    <div class="kicker">{eyebrow}</div>
+    <h2>{heading_html}</h2>
+    <div class="editorial-grid">
+      <div><p class="lede">{body}</p><div class="pullquote">{callout}</div><div class="tile-grid">{tiles}</div></div>
+      <div>{visual}</div>
+    </div>
+  </div>
+  <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
+</section>""")
+        elif ptype in ("grid", "stats"):
+            stats = page.get("stats") or []
+            tiles_source = page.get("tiles") or [{"label": s.get("number", f"{i+1:02d}"), "value": f"{s.get('label','')} {s.get('sub','')}".strip()} for i, s in enumerate(stats[:4])] or [{"label": f"{i+1:02d}", "value": h} for i, h in enumerate(highlights)]
+            tiles = "".join(f'<div class="tile"><b>{escape(_clip_chars(t.get("label","Signal"), 22))}</b><span>{escape(_clip_words(t.get("value",""), 16))}</span></div>' for t in tiles_source[:4])
+            pages.append(f"""
+<section class="page spread">
+  {_premium_svg_backdrop(P, idx)}
+  <div class="content">
+    <div class="kicker">{eyebrow}</div>
+    <h2>{heading_html}</h2>
+    <p class="lede">{body}</p>
+    <div class="editorial-grid"><div>{visual}</div><div><div class="tile-grid">{tiles}</div><div class="pullquote">{callout}</div></div></div>
+  </div>
+  <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
+</section>""")
+        elif ptype == "timeline":
+            steps = page.get("steps") or []
+            step_tiles = "".join(f'<div class="tile"><b>{escape(_clip_chars(s.get("date") or s.get("step") or f"Phase {i+1}", 24))}</b><span>{escape(_clip_words(s.get("desc") or s.get("step") or "", 18))}</span></div>' for i, s in enumerate(steps[:4]))
+            pages.append(f"""
+<section class="page chapter">
+  {_premium_svg_backdrop(P, idx)}
+  <div class="chapter-mark">{idx:02d}</div>
+  <div class="content">
+    <div class="kicker">{eyebrow}</div>
+    <h2>{heading_html}</h2>
+    <div class="editorial-grid"><div><p>{body}</p><div class="pullquote">{callout}</div></div><div>{visual}</div></div>
+    <div class="tile-grid">{step_tiles}</div>
+  </div>
+  <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
+</section>""")
+        else:
+            insights = "".join(f'<div class="insight">{h}</div>' for h in highlights)
+            pages.append(f"""
+<section class="page chapter">
+  {_premium_svg_backdrop(P, idx)}
+  <div class="chapter-mark">{idx:02d}</div>
+  <div class="content">
+    <div class="kicker">{eyebrow}</div>
+    <h2>{heading_html}</h2>
+    <div class="editorial-grid"><div><p>{body}</p><div class="pullquote">{callout}</div><div class="insights">{insights}</div></div><div>{visual}</div></div>
+  </div>
+  <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
+</section>""")
+
+    pagination_css = CSS(string="""
+        @page { size: A4; margin: 0; }
+        .page { page-break-after: always; break-after: page; }
+        .page:last-child { page-break-after: auto; break-after: auto; }
+        .premium-stat, .premium-chart, .premium-table, .photo-plate, .signal-map, .tile, .pullquote { break-inside: avoid; page-break-inside: avoid; }
+        h1, h2, h3 { break-after: avoid; page-break-after: avoid; }
+        p { orphans: 3; widows: 3; }
+    """)
+    html_doc = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/>{fonts_link}<style>{css}</style></head><body>{"".join(pages)}</body></html>"""
     return html_doc, pagination_css
 
 
