@@ -217,66 +217,251 @@ PALETTES = {
     },
 }
 
-INTERIOR_LAYOUTS = ["split","feature","grid","quote","timeline","stats","editorial","manifesto"]
+PDF_PAGE_SEQUENCE = [
+    "cover", "context", "deep_dive_1", "deep_dive_2", "deep_dive_3",
+    "comparative", "case_study", "future", "takeaways", "closing",
+]
+
+PPTX_SLIDE_SEQUENCE = [
+    "title", "context", "deep_dive_1", "deep_dive_2", "deep_dive_3",
+    "comparative", "case_study", "future", "takeaways", "closing",
+]
+
+PDF_TYPE_TO_LAYOUT = {
+    "cover": "cover", "context": "feature", "deep_dive_1": "editorial",
+    "deep_dive_2": "split", "deep_dive_3": "stats", "comparative": "timeline",
+    "case_study": "quote", "future": "manifesto", "takeaways": "grid", "closing": "closing",
+    "split": "split", "feature": "feature", "grid": "grid", "quote": "quote",
+    "timeline": "timeline", "stats": "stats", "editorial": "editorial",
+    "manifesto": "manifesto",
+}
+
+PPTX_TYPE_TO_LAYOUT = {
+    "title": "title", "cover": "title", "context": "stat", "deep_dive_1": "two_col",
+    "deep_dive_2": "image_text", "deep_dive_3": "stat", "comparative": "two_col",
+    "case_study": "quote", "future": "image_text", "takeaways": "stat", "closing": "closing",
+    "bullets": "bullets", "two_col": "two_col", "stat": "stat", "quote": "quote",
+    "image_text": "image_text",
+}
+
+AESTHETIC_DIRECTIONS = [
+    "editorial_magazine", "scientific_brutalism", "cinematic_dark", "bauhaus_data",
+    "japanese_minimalism", "retro_futurism", "nature_organic", "neon_cyberpunk",
+    "luxury_editorial", "abstract_expressionism",
+]
+
+
+def _creative_director_core(doc_kind: str, unit_count: int, unit_label: str) -> str:
+    aesthetics = ", ".join(AESTHETIC_DIRECTIONS)
+    return f"""You are a world-class creative director, data visualization expert, and document strategist.
+Return ONLY valid JSON — no markdown fences, no commentary.
+
+CORE DIRECTIVE:
+- Do NOT reuse generic templates. Pick ONE aesthetic direction from: {aesthetics}
+  (or invent a better one). State which direction you chose and why it fits the topic.
+- Commit fully to that aesthetic across all {unit_count} {unit_label}s.
+- Use REAL topic-specific data: authentic statistics, dates, names, figures. No lorem ipsum.
+
+DESIGN SYSTEM (define before content — lock it in):
+- colors: exactly 5 named hex values — dominant, secondary, supporting_1, supporting_2, accent (accent used sparingly)
+- typography: 2–3 Google Fonts with exact usage (h1_font, h2_font, body_font, data_font) plus weights/sizes
+- layout_philosophy: one sentence describing grid rotation strategy
+- signature_element: ONE visual motif repeated for cohesion (shape, line, texture, or chart style)
+
+FORBIDDEN:
+- Generic blue gradient backgrounds on every page
+- Identical layout structure repeated
+- Bullet lists as primary content format
+- Default stock chart styling
+- Centered title + centered body used more than once
+- Placeholder or generic content
+
+EVERY {unit_label.upper()} MUST include at least ONE of:
+- chart_data (real numbers), hero_stat (single powerful stat), data_table (styled table),
+  or shape_motif (describe SVG/geometric composition reinforcing the topic)
+
+CONTENT STRUCTURE for {unit_count} {unit_label}s (adapt if count differs — preserve order):
+1. COVER — cinematic, aesthetic fully declared
+2. CONTEXT/OVERVIEW — stakes via data viz, not bullets
+3. DEEP DIVE 1 — most complex layout, layered data
+4. DEEP DIVE 2 — visual storytelling
+5. DEEP DIVE 3 — quantitative, data-forward
+6. COMPARATIVE or TIMELINE — side-by-side or chronological
+7. CASE STUDY — pull quote + supporting data, editorial
+8. FUTURE — forward-looking, abstract shapes
+9. TAKEAWAYS — visual grid/cards, NOT bullet list
+10. CLOSING — as impactful as cover, signature element"""
+
+
+def _resolve_design_tokens(structure: dict) -> dict:
+    """Merge AI design_system colors with legacy palette fallback."""
+    ds = structure.get("design_system") or {}
+    colors = ds.get("colors") or {}
+    typo = ds.get("typography") or {}
+    pname = str(structure.get("palette", "indigo")).lower()
+    base = PALETTES.get(pname, PALETTES["indigo"])
+
+    def _hex(key: str, fallback: str) -> str:
+        val = colors.get(key) or colors.get(key.replace("_", ""))
+        if val and re.match(r"^#[0-9A-Fa-f]{6}$", str(val)):
+            return str(val)
+        return fallback
+
+    dominant = _hex("dominant", base["primary"])
+    secondary = _hex("secondary", base["card2"])
+    sup1 = _hex("supporting_1", base["mid"])
+    sup2 = _hex("supporting_2", base["light"])
+    accent = _hex("accent", base["accent"])
+
+    return {
+        "primary": dominant,
+        "accent": accent,
+        "mid": sup1,
+        "light": sup2,
+        "wash": _hex("supporting_2", base["wash"]),
+        "text": base["text"],
+        "dark": secondary if secondary != dominant else base["dark"],
+        "soft": sup1,
+        "white": base["white"],
+        "card2": secondary,
+        "muted": sup2,
+        "body": base["body"],
+        "h1_font": typo.get("h1_font") or typo.get("display_font") or "Playfair Display",
+        "h2_font": typo.get("h2_font") or typo.get("h1_font") or "DM Sans",
+        "body_font": typo.get("body_font") or "Source Sans 3",
+        "data_font": typo.get("data_font") or typo.get("body_font") or "JetBrains Mono",
+        "signature_element": ds.get("signature_element") or "",
+        "layout_philosophy": ds.get("layout_philosophy") or "",
+    }
+
+
+def _google_fonts_link(tokens: dict) -> str:
+    families = []
+    for key in ("h1_font", "h2_font", "body_font", "data_font"):
+        name = str(tokens.get(key, "")).strip()
+        if name and name not in families:
+            families.append(name)
+    if not families:
+        return ""
+    params = "&".join(f"family={f.replace(' ', '+')}:wght@300;400;500;600;700;800;900" for f in families)
+    return f'<link href="https://fonts.googleapis.com/css2?{params}&display=swap" rel="stylesheet"/>'
+
+
+def _generate_data_table_html(table: dict, P: dict) -> str:
+    headers = table.get("headers") or []
+    rows = table.get("rows") or []
+    if not headers or not rows:
+        return ""
+    hdr = "".join(
+        f'<th style="background:{P["primary"]};color:white;padding:3mm 4mm;'
+        f'font-family:var(--font-data);font-size:7.5pt;text-align:left;">{escape(str(h))}</th>'
+        for h in headers[:6]
+    )
+    body_rows = ""
+    for ri, row in enumerate(rows[:8]):
+        bg = P["wash"] if ri % 2 == 0 else P["white"]
+        cells = "".join(
+            f'<td style="padding:2.8mm 4mm;font-family:var(--font-body);font-size:8.5pt;'
+            f'border-bottom:0.3mm solid {P["light"]};">{escape(str(c))}</td>'
+            for c in (list(row) + [""] * len(headers))[:len(headers)]
+        )
+        body_rows += f'<tr style="background:{bg};">{cells}</tr>'
+    return f"""<div class="data-table-wrap" style="margin:6mm 0;border-radius:4mm;overflow:hidden;
+      border:0.4mm solid {P['light']};">
+  <table style="width:100%;border-collapse:collapse;">{hdr and f'<thead><tr>{hdr}</tr></thead>' or ''}
+  <tbody>{body_rows}</tbody></table></div>"""
+
+
+def _generate_hero_stat_html(stat: dict, P: dict) -> str:
+    if not stat:
+        return ""
+    val = escape(str(stat.get("value") or stat.get("number") or "—"))
+    lbl = escape(str(stat.get("label") or ""))
+    ctx = escape(str(stat.get("context") or stat.get("sub") or ""))
+    return f"""<div class="hero-stat" style="margin:8mm 0;padding:10mm 12mm;
+      background:linear-gradient(135deg,{P['primary']},{P['accent']});
+      border-radius:6mm;color:white;text-align:center;">
+  <div style="font-family:var(--font-display);font-size:52pt;font-weight:800;
+    letter-spacing:-0.04em;line-height:1;">{val}</div>
+  <div style="font-family:var(--font-body);font-size:11pt;font-weight:600;
+    letter-spacing:0.12em;text-transform:uppercase;margin-top:4mm;opacity:0.9;">{lbl}</div>
+  <div style="font-family:var(--font-body);font-size:9pt;margin-top:3mm;opacity:0.75;max-width:120mm;margin-inline:auto;">{ctx}</div>
+</div>"""
 
 
 async def call_ai_pdf(prompt: str, page_count: int) -> dict:
-    system = f"""You are a premium editorial content strategist. Return ONLY valid JSON, no markdown fences.
-Generate content for exactly {page_count} PDF pages. Each page maps 1:1 to one physical printed page.
+    core = _creative_director_core("page", page_count, "page")
+    system = f"""{core}
 
-PALETTE — pick one that emotionally fits the topic:
-indigo=tech/professional, teal=health/sustainability, crimson=energy/urgency, emerald=growth/nature,
-slate=enterprise/legal, violet=creative/luxury, amber=warmth/food/culture, rose=beauty/lifestyle, navy=corporate/finance, monochrome=minimalist/legal
+Generate exactly {page_count} PDF pages. Each page = one physical A4 sheet.
 
-PAGE TYPES (use variety, never same type twice in a row):
-- "cover"      → page 1 only: big hero title, subtitle, author tagline
-- "split"      → 60/40 two-column: editorial body + highlights sidebar
-- "feature"    → full-width hero band heading + body + 3-card row
-- "grid"       → heading + body + 2×2 fact/stat tiles
-- "quote"      → dark full-bleed page, giant pull-quote + body + pill badges
-- "timeline"   → heading + 3-4 connected numbered steps + callout
-- "stats"      → heading + 3 big-number hero stat cards + body
-- "editorial"  → magazine-style: large heading left, body right, bottom band callout
-- "manifesto"  → bold typographic page: stacked large statements + body
-- "closing"    → last page: takeaways + CTA gradient band
+PAGE TYPES (fixed narrative order — each maps to a distinct grid):
+- "cover"       → page 1: cinematic cover; declare aesthetic direction
+- "context"     → overview with data visualization establishing stakes
+- "deep_dive_1" → richest layout: layered data, annotations, chart or table
+- "deep_dive_2" → visual storytelling: split narrative + highlights
+- "deep_dive_3" → quantitative: 3 hero stat cards + chart
+- "comparative" → timeline or before/after: steps with dates/figures
+- "case_study"  → pull quote + attribution + supporting metrics
+- "future"      → forward-looking manifesto statements + abstract tone
+- "takeaways"   → 4 visual tiles/cards — NOT bullet list
+- "closing"     → impactful close on signature element
 
-For "grid": provide "tiles": [{{"label":"label","value":"fact or number"}}] (3-4 tiles)
-For "timeline": provide "steps": [{{"step":"label","desc":"one sentence"}}] (3-4 steps)
-For "stats": provide "stats": [{{"number":"value","label":"what it measures","sub":"one sentence context"}}] (exactly 3)
-For "closing": provide "takeaways": ["short takeaway"] (3-4 items)
-For "manifesto": provide "statements": ["Bold declarative sentence."] (3 statements)
-
-MANDATORY DATA REQUIREMENTS:
-1. You MUST include "chart_data": [["Label 1", 40], ["Label 2", 80]] (3-7 items) on EXACTLY TWO interior pages.
-2. You MUST include an "image_keyword" (e.g. "butterfly macro", "forest canopy") on EVERY SINGLE interior page that does NOT have chart_data.
-3. Never put both chart_data and image_keyword on the same page.
+Field usage:
+- tiles: [{{"label":"","value":""}}] for takeaways/grid pages (exactly 4)
+- steps: [{{"step":"","desc":"","date":""}}] for comparative/timeline (3-5)
+- stats: [{{"number":"","label":"","sub":""}}] for deep_dive_3 (exactly 3)
+- takeaways: ["visual card text"] for closing (3-4)
+- statements: ["Bold sentence."] for future/manifesto (3)
+- chart_data: [["Label", numeric_value], ...] (3-7 items) — real data
+- hero_stat: {{"value":"847M","label":"METRIC","context":"one sentence"}}
+- data_table: {{"headers":["Col1","Col2"],"rows":[["a","b"]]}}
+- image_keyword: photorealistic topic image (when no chart/table on that page)
 
 JSON schema:
 {{
   "title": "Document title",
   "subtitle": "Compelling subtitle",
-  "palette": "indigo|teal|crimson|emerald|slate|violet|amber|rose|navy|monochrome",
-  "author": "Prepared for [topic] — 2025",
+  "author": "Prepared for [topic] — 2026",
+  "aesthetic_direction": {{
+    "name": "cinematic_dark",
+    "label": "Human-readable direction name",
+    "rationale": "Why this aesthetic fits the topic (2 sentences)"
+  }},
+  "design_system": {{
+    "colors": {{
+      "dominant": "#1A1A2E", "secondary": "#16213E",
+      "supporting_1": "#0F3460", "supporting_2": "#E8E8E8", "accent": "#E94560"
+    }},
+    "typography": {{
+      "h1_font": "Playfair Display", "h2_font": "DM Sans",
+      "body_font": "Source Sans 3", "data_font": "JetBrains Mono"
+    }},
+    "layout_philosophy": "Rotate full-bleed, 60/40 split, 3-column, hero, L-shape, diagonal",
+    "signature_element": "Glowing accent arc repeated on every page footer"
+  }},
+  "palette": "indigo",
   "pages": [
     {{
-      "type": "cover|split|feature|grid|quote|timeline|stats|editorial|manifesto|closing",
+      "type": "cover|context|deep_dive_1|deep_dive_2|deep_dive_3|comparative|case_study|future|takeaways|closing",
       "eyebrow": "SECTION LABEL",
-      "heading": "Compelling page headline",
-      "body": "Rich paragraph, minimum 80 words, specific and insightful.",
-      "highlights": ["Punchy point one", "Punchy point two", "Punchy point three"],
-      "callout": "One memorable quotable sentence.",
+      "heading": "Page headline",
+      "body": "Rich paragraph, 80+ words, specific expert content with real figures.",
+      "highlights": ["Insight one", "Insight two", "Insight three"],
+      "callout": "Memorable quotable sentence.",
+      "attribution": "— Source (case_study only)",
       "tiles": [], "steps": [], "stats": [], "takeaways": [], "statements": [],
-      "chart_data": [], "image_keyword": ""
+      "chart_data": [], "hero_stat": {{}}, "data_table": {{}}, "image_keyword": ""
     }}
   ]
 }}
 
 RULES:
 - pages[0].type MUST be "cover"
-- pages[{page_count-1}].type MUST be "closing" if page_count > 2
-- Interior pages: vary types — mix editorial/manifesto/stats/timeline/grid/quote/split/feature
-- body: minimum 80 words of rich, specific, expert-level content
-- highlights: 3-4 items always
+- pages[{page_count - 1}].type MUST be "closing"
+- Follow narrative order above; skip middle sections only if page_count < 10
+- Every page: include chart_data OR hero_stat OR data_table OR image_keyword
+- body: 80+ words, topic-specific, no placeholders
 - pages array MUST have exactly {page_count} items"""
 
     raw = await _deepinfra_call([
@@ -287,7 +472,8 @@ RULES:
     pages = data.get("pages", [])
     while len(pages) < page_count:
         i = len(pages)
-        lt = INTERIOR_LAYOUTS[i % len(INTERIOR_LAYOUTS)]
+        seq_idx = min(i, len(PDF_PAGE_SEQUENCE) - 1)
+        lt = PDF_PAGE_SEQUENCE[seq_idx]
         pages.append({
             "type": lt, "eyebrow": f"SECTION {i+1}",
             "heading": f"Key Insight {i+1}",
@@ -295,13 +481,12 @@ RULES:
             "highlights": ["Structured insight", "Clear implication", "Practical takeaway"],
             "callout": "The strongest documents stay precise, structured, and visually deliberate.",
             "tiles": [], "steps": [], "stats": [], "takeaways": [], "statements": [],
+            "hero_stat": {}, "data_table": {},
         })
     data["pages"] = pages[:page_count]
-    _enforce_no_consecutive_layouts(
-        data["pages"], "type",
-        interior_types=INTERIOR_LAYOUTS,
-        pin_first="cover", pin_last="closing",
-    )
+    if page_count >= 2:
+        data["pages"][0]["type"] = "cover"
+        data["pages"][-1]["type"] = "closing"
     return data
 
 
@@ -680,12 +865,16 @@ def _visual_panel(P: dict, idx: int, label: str = "") -> str:
 # ─── Main renderer ────────────────────────────────────────────────────────────
 
 def render_pdf_html(structure: dict, page_count: int) -> str:
-    pname = str(structure.get("palette","indigo")).lower()
-    P = PALETTES.get(pname, PALETTES["indigo"])
+    P = _resolve_design_tokens(structure)
 
     title    = escape(str(structure.get("title")    or "Report"))
     subtitle = escape(str(structure.get("subtitle") or ""))
     author   = escape(str(structure.get("author")   or ""))
+    aesthetic = structure.get("aesthetic_direction") or {}
+    aesthetic_label = escape(str(aesthetic.get("label") or aesthetic.get("name") or ""))
+    aesthetic_rationale = escape(str(aesthetic.get("rationale") or ""))
+    signature = escape(str(P.get("signature_element") or ""))
+    fonts_link = _google_fonts_link(P)
 
     css_vars = f"""
 :root {{
@@ -701,6 +890,10 @@ def render_pdf_html(structure: dict, page_count: int) -> str:
   --white:   {P['white']};
   --card2:   {P['card2']};
   --muted:   {P['muted']};
+  --font-display: '{P['h1_font']}', Georgia, serif;
+  --font-heading: '{P['h2_font']}', 'Helvetica Neue', sans-serif;
+  --font-body: '{P['body_font']}', 'Helvetica Neue', Arial, sans-serif;
+  --font-data: '{P['data_font']}', 'Courier New', monospace;
 
   /* Typography Scale */
   --text-xs: 7pt;   --text-sm: 8.5pt;  --text-base: 10pt;
@@ -741,7 +934,7 @@ def render_pdf_html(structure: dict, page_count: int) -> str:
 
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 html, body {{
-  font-family: Georgia, 'Times New Roman', serif;
+  font-family: var(--font-body);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   /* WEASYPRINT FIXES */
@@ -751,10 +944,11 @@ html, body {{
 }}
 img {{ max-width: 100%; height: auto; display: block; }}
 h1, h2, h3, h4, h5, h6, .eyebrow {{
-  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-family: var(--font-heading);
 }}
-code, pre {{
-  font-family: 'Courier New', Courier, monospace;
+h1 {{ font-family: var(--font-display); }}
+code, pre, .data-table-wrap th, .data-table-wrap td {{
+  font-family: var(--font-data);
 }}
 
 {css_vars}
@@ -810,10 +1004,10 @@ h1, h2, h3, .eyebrow {{
 /* ═══════════════════════════════════════════
    TYPOGRAPHY
    ═══════════════════════════════════════════ */
-h1 {{ font-family: Georgia, serif; font-weight: 700; letter-spacing: -0.03em; line-height: 1.05; }}
-h2 {{ font-family: Georgia, serif; font-weight: 700; letter-spacing: -0.02em; line-height: 1.10; }}
-h3 {{ font-family: Georgia, serif; font-weight: 700; line-height: 1.18; }}
-p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
+h1 {{ font-family: var(--font-display); font-weight: 700; letter-spacing: -0.03em; line-height: 1.05; }}
+h2 {{ font-family: var(--font-display); font-weight: 700; letter-spacing: -0.02em; line-height: 1.10; }}
+h3 {{ font-family: var(--font-heading); font-weight: 700; line-height: 1.18; }}
+p  {{ font-family: var(--font-body); font-weight: 400; }}
 
 .visual-panel {{
   width: 100%;
@@ -902,6 +1096,22 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
 .cover-callout {{
   font-family: Georgia, serif; font-size: 11pt; font-style: italic;
   max-width: 108mm; line-height: 1.55; opacity: 0.88;
+}}
+.cover-aesthetic {{
+  display: inline-block;
+  background: rgba(255,255,255,0.10);
+  border: 1px solid rgba(255,255,255,0.22);
+  border-radius: 20mm; padding: 2.5mm 9mm;
+  font-family: var(--font-data); font-size: 6.5pt; letter-spacing: 0.20em;
+  text-transform: uppercase; margin-bottom: 6mm; color: rgba(255,255,255,0.80);
+}}
+.cover-rationale {{
+  font-family: var(--font-body); font-size: 9pt; line-height: 1.45;
+  opacity: 0.65; max-width: 130mm; margin-top: 5mm; font-style: italic;
+}}
+.cover-signature {{
+  font-family: var(--font-data); font-size: 7pt; letter-spacing: 0.14em;
+  text-transform: uppercase; opacity: 0.45; margin-top: 4mm;
 }}
 .cover-num {{
   font-size: 64pt; font-weight: 200; opacity: 0.15; line-height: 1;
@@ -1284,7 +1494,8 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
     pages_html = []
 
     for idx, page in enumerate(structure["pages"][:page_count], start=1):
-        ptype      = str(page.get("type","split")).lower()
+        raw_type   = str(page.get("type","split")).lower()
+        ptype      = PDF_TYPE_TO_LAYOUT.get(raw_type, raw_type)
         eyebrow    = escape(str(page.get("eyebrow") or f"SECTION {idx}"))
         body_limit = {
             "split": 72, "feature": 70, "grid": 62, "quote": 58,
@@ -1294,6 +1505,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
         heading    = escape(_clip_words(page.get("heading") or title, 14))
         body       = escape(_clip_words(page.get("body") or "", body_limit))
         callout    = escape(_clip_words(page.get("callout") or "", 30))
+        attribution = escape(str(page.get("attribution") or ""))
         highlights = [escape(_clip_words(str(h), 20)) for h in (page.get("highlights") or [])[:4]]
         tiles      = page.get("tiles") or []
         steps      = page.get("steps") or []
@@ -1301,20 +1513,21 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
         takeaways  = page.get("takeaways") or []
         statements = page.get("statements") or []
         chart_data = page.get("chart_data") or []
+        hero_stat  = page.get("hero_stat") or {}
+        data_table = page.get("data_table") or {}
         image_data = page.get("image_data") or ""
 
         visual = None
         has_chart = chart_data and isinstance(chart_data, list) and len(chart_data) > 0 and len(chart_data[0]) >= 2
         has_image = bool(image_data.strip())
+        has_hero = isinstance(hero_stat, dict) and bool(hero_stat.get("value") or hero_stat.get("number"))
+        has_table = isinstance(data_table, dict) and bool(data_table.get("rows"))
 
-        # If both are provided, alternate them to ensure variety
-        if has_chart and has_image:
-            if idx % 2 == 0:
-                has_image = False
-            else:
-                has_chart = False
-
-        if has_image:
+        if has_hero:
+            visual = _generate_hero_stat_html(hero_stat, P)
+        elif has_table:
+            visual = _generate_data_table_html(data_table, P)
+        elif has_image:
             visual = f"""<div class="visual-panel" style="padding:0; border:none;">
   <img src="{image_data}" style="width:100%; height:100%; object-fit:cover; display:block;" />
 </div>"""
@@ -1322,27 +1535,36 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
             try:
                 valid_data = [(str(d[0]), float(d[1])) for d in chart_data[:8]]
                 if idx % 3 == 0:
-                    visual = _generate_svg_donut(valid_data, title=heading)
+                    visual = _generate_svg_donut(
+                        [(lbl, val, P["accent"] if i % 2 == 0 else P["mid"]) for i, (lbl, val) in enumerate(valid_data)],
+                        title=heading,
+                    )
                 elif idx % 3 == 1:
                     visual = _generate_svg_area_chart(valid_data, line_color=P["accent"], title=heading)
                 else:
                     visual = _generate_svg_bar_chart(valid_data, bar_color=P["accent"], bg=P["primary"], title=heading)
             except (ValueError, TypeError):
                 pass
-                
+
         if not visual:
             visual = _visual_panel(P, idx, heading)
 
         # ── COVER ──────────────────────────────────────────────────────────
         if ptype == "cover":
+            aesthetic_badge = f'<div class="cover-aesthetic">{aesthetic_label}</div>' if aesthetic_label else ""
+            rationale_block = f'<p class="cover-rationale">{aesthetic_rationale}</p>' if aesthetic_rationale else ""
+            sig_block = f'<p class="cover-signature">Motif: {signature}</p>' if signature else ""
             pages_html.append(f"""
 <section class="page cover">
   {_svg_cover_geometric(P['primary'], P['accent'], P['mid'])}
   {_svg_noise_overlay('rgba(255,255,255,0.8)')}
   <div class="cover-inner">
+    {aesthetic_badge}
     <div class="cover-label">{eyebrow}</div>
     <h1 class="cover-title">{heading}</h1>
     <p class="cover-subtitle">{subtitle}</p>
+    {rationale_block}
+    {sig_block}
   </div>
   <div class="cover-bottom">
     <div class="cover-rule"></div>
@@ -1441,6 +1663,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
         # ── QUOTE ──────────────────────────────────────────────────────────
         elif ptype == "quote":
             pills = "".join(f'<span class="quote-pill">{h}</span>' for h in highlights)
+            attrib_line = f'<p style="font-family:var(--font-body);font-size:10pt;color:{P["muted"]};margin-top:5mm;font-weight:600;">{attribution}</p>' if attribution else ""
             pages_html.append(f"""
 <section class="page quote-page">
   {_svg_arc_decoration(P['soft'])}
@@ -1452,6 +1675,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
     <div class="quote-box">
       <p>{callout}</p>
     </div>
+    {attrib_line}
     <p class="quote-body">{body}</p>
     {visual}
   </div>
@@ -1649,6 +1873,7 @@ p  {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-weight: 400; }}
     html_doc = f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"/>
+{fonts_link}
 <style>{global_css}</style>
 </head><body>{"".join(pages_html)}</body></html>"""
 
@@ -1684,8 +1909,8 @@ def _quality_check(pdf_bytes: bytes) -> dict:
 @app.post("/docs/generate/pdf")
 async def generate_pdf(payload: dict):
     try:
-        prompt = payload["prompt"]
-        page_count = requested_count(prompt, "page", default=5, minimum=1, maximum=15)
+        prompt = _normalize_topic_prompt(payload["prompt"])
+        page_count = requested_count(prompt, "page", default=10, minimum=8, maximum=12)
         structure = await call_ai_pdf(prompt, page_count)
         await _prefetch_images(structure)
         html_doc, pagination_css = render_pdf_html(structure, page_count)
@@ -1710,55 +1935,74 @@ async def generate_pdf(payload: dict):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def call_ai_pptx(prompt: str, slide_count: int) -> dict:
-    system = f"""You are an elite presentation strategist. Return ONLY valid JSON, no markdown fences.
-Generate content for exactly {slide_count} slides. slides[0] is ALWAYS the title slide.
+    core = _creative_director_core("slide", slide_count, "slide")
+    system = f"""{core}
 
-PALETTE OPTIONS (pick one that fits the topic):
-midnight=deep navy professional, forest=green nature, coral=energetic warm, 
-terracotta=warm cultural, ocean=deep blue tech, charcoal=minimal elegant,
-berry=premium luxury, cherry=bold dramatic
+Generate exactly {slide_count} presentation slides. slides[0] is ALWAYS the title/cover slide.
 
-SLIDE TYPES:
-- "title"      → slides[0] only: big title, subtitle, tagline
-- "bullets"    → standard: heading + 4-5 rich bullet points  
-- "two_col"    → heading + left_points list + right_points list (two equal columns)
-- "stat"       → heading + 3 big stat cards (number + label + context)
-- "quote"      → big pull-quote + attribution + supporting points
-- "image_text" → heading + body paragraph + highlight sidebar
-- "closing"    → final slide: closing headline + call to action + tagline
+SLIDE TYPES (narrative order — each uses a distinct layout):
+- "title"       → slide 1: cinematic cover, aesthetic declared in subtitle/tagline
+- "context"     → overview with 3 stat cards establishing stakes
+- "deep_dive_1" → two-column comparison of key factors
+- "deep_dive_2" → image_text: body + highlight sidebar, visual storytelling
+- "deep_dive_3" → 3 stat cards with real quantitative data
+- "comparative" → two_col: before/after or side-by-side analysis
+- "case_study"  → pull quote + attribution + 3 supporting highlight cards
+- "future"      → image_text: forward-looking body + aspirational highlights
+- "takeaways"   → 3 stat-style insight cards — NOT bullet list
+- "closing"     → final slide: headline + CTA + signature tagline
 
 JSON schema:
 {{
   "title": "Deck title",
   "subtitle": "Subtitle line",
-  "palette": "<palette name>",
+  "aesthetic_direction": {{
+    "name": "bauhaus_data",
+    "label": "Bauhaus Data Art",
+    "rationale": "Why this aesthetic fits (2 sentences)"
+  }},
+  "design_system": {{
+    "colors": {{
+      "dominant": "#1A1A2E", "secondary": "#16213E",
+      "supporting_1": "#0F3460", "supporting_2": "#E8E8E8", "accent": "#E94560"
+    }},
+    "typography": {{
+      "h1_font": "Archivo Black", "h2_font": "Work Sans",
+      "body_font": "IBM Plex Sans", "data_font": "Space Mono"
+    }},
+    "signature_element": "Geometric triangle accent in top-right corner"
+  }},
+  "palette": "midnight",
   "slides": [
     {{
-      "type": "title|bullets|two_col|stat|quote|image_text|closing",
+      "type": "title|context|deep_dive_1|deep_dive_2|deep_dive_3|comparative|case_study|future|takeaways|closing",
       "title": "Slide headline",
-      "subtitle": "Only for title slide",
-      "tagline": "Only for title or closing slide",
-      "bullets": ["Bullet with enough detail to be useful (15+ words each)", "..."],
-      "left_points": ["Point A", "Point B", "Point C"],
-      "right_points": ["Point D", "Point E", "Point F"],
-      "stats": [{{"number":"big value","label":"what it is","context":"one sentence"}}],
-      "quote": "Full memorable quote text",
-      "attribution": "— Source or speaker",
-      "body": "Rich paragraph for image_text slides",
-      "highlights": ["Sidebar point 1", "Sidebar point 2", "Sidebar point 3"],
-      "cta": "Call to action text for closing slide"
+      "subtitle": "Title slide only",
+      "tagline": "Title or closing — include aesthetic direction label",
+      "bullets": [],
+      "left_points": ["Left column point with 15+ words of detail"],
+      "right_points": ["Right column point with 15+ words of detail"],
+      "stats": [{{"number":"847M","label":"METRIC","context":"Real context sentence"}}],
+      "quote": "Full memorable quote",
+      "attribution": "— Source Name, Year",
+      "body": "Rich paragraph for image_text slides, 60+ words",
+      "highlights": ["Sidebar insight with real data"],
+      "chart_data": [["Label", 42]],
+      "cta": "Call to action for closing slide"
     }}
   ]
 }}
 
 RULES:
 - slides[0].type MUST be "title"
-- slides[{slide_count-1}].type MUST be "closing"
-- Interior slides: mix bullets, two_col, stat, quote, image_text — never same type twice in a row
-- stat slides: always exactly 3 stat objects
-- two_col: always 3 items in left_points and 3 in right_points
-- bullets: 4-5 items, each 15+ words
-- The slides array MUST contain exactly {slide_count} items"""
+- slides[{slide_count - 1}].type MUST be "closing"
+- Follow narrative order; skip middle sections only if slide_count < 10
+- stat/context/deep_dive_3/takeaways slides: exactly 3 stat objects with REAL numbers
+- two_col/comparative/deep_dive_1: 3 items in left_points AND 3 in right_points
+- case_study: quote + attribution + 3 highlights
+- image_text/deep_dive_2/future: body 60+ words + 3-4 highlights
+- NO bullet-list-primary slides — use stats, columns, or quote layouts
+- slides array MUST contain exactly {slide_count} items"""
 
     raw = await _deepinfra_call([
         {"role": "system", "content": system},
@@ -1768,20 +2012,44 @@ RULES:
     slides = data.get("slides", [])
     while len(slides) < slide_count:
         i = len(slides)
+        seq_idx = min(i, len(PPTX_SLIDE_SEQUENCE) - 1)
+        lt = PPTX_SLIDE_SEQUENCE[seq_idx]
         slides.append({
-            "type": "bullets", "title": f"Key Insight {i+1}",
-            "bullets": ["This slide presents essential detail on the topic with clear, actionable perspective.",
-                        "Each point is crafted to deliver maximum value to the audience.",
-                        "Visual clarity and content depth define this presentation's approach.",
-                        "Strategic thinking drives every recommendation made here."]
+            "type": lt, "title": f"Key Insight {i+1}",
+            "stats": [{"number": "—", "label": "Metric", "context": "Supporting context for this insight."}] * 3,
+            "left_points": ["Left perspective with actionable detail on the topic."] * 3,
+            "right_points": ["Right perspective with complementary analysis."] * 3,
+            "highlights": ["Key insight with real relevance to the topic."] * 3,
+            "body": "This slide presents essential detail on the topic with clear, actionable perspective crafted for maximum audience value.",
         })
     data["slides"] = slides[:slide_count]
-    _enforce_no_consecutive_layouts(
-        data["slides"], "type",
-        interior_types=["bullets", "two_col", "stat", "quote", "image_text"],
-        pin_first="title", pin_last="closing",
-    )
+    if slide_count >= 2:
+        data["slides"][0]["type"] = "title"
+        data["slides"][-1]["type"] = "closing"
     return data
+
+
+def _hex_to_rgb_tuple(hex_color: str) -> tuple:
+    h = str(hex_color).lstrip("#")
+    if len(h) != 6:
+        return (0x1E, 0x27, 0x61)
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def _pptx_palette_from_structure(structure: dict) -> dict:
+    tokens = _resolve_design_tokens(structure)
+    bg = _hex_to_rgb_tuple(tokens["primary"])
+    card = _hex_to_rgb_tuple(tokens["card2"])
+    accent = _hex_to_rgb_tuple(tokens["accent"])
+    light = _hex_to_rgb_tuple(tokens["light"])
+    white = (0xFF, 0xFF, 0xFF)
+    gray = _hex_to_rgb_tuple(tokens["mid"])
+    return {
+        "bg": bg, "primary": bg, "accent": accent, "light": light,
+        "white": white, "gray": gray, "card": card,
+        "h1_font": tokens["h1_font"], "h2_font": tokens["h2_font"],
+        "body_font": tokens["body_font"], "data_font": tokens["data_font"],
+    }
 
 
 PPTX_PALETTES = {
@@ -1859,16 +2127,29 @@ def _pptx_decor(slide, pal, stype):
 
 @app.post("/docs/generate/pptx")
 async def generate_pptx(payload: dict):
-    prompt = payload["prompt"]
-    slide_count = requested_count(prompt, "slide", default=8, minimum=3, maximum=20)
+    prompt = _normalize_topic_prompt(payload["prompt"])
+    slide_count = requested_count(prompt, "slide", default=10, minimum=8, maximum=12)
     structure = await call_ai_pptx(prompt, slide_count)
 
     prs = Presentation()
     prs.slide_width  = PPTXInches(13.33)
     prs.slide_height = PPTXInches(7.5)
 
-    pname = str(structure.get("palette","midnight")).lower()
-    pal = PPTX_PALETTES.get(pname, PPTX_PALETTES["midnight"])
+    if structure.get("design_system"):
+        pal = _pptx_palette_from_structure(structure)
+    else:
+        pname = str(structure.get("palette", "midnight")).lower()
+        pal = PPTX_PALETTES.get(pname, PPTX_PALETTES["midnight"])
+        pal = {**pal, "h1_font": "Calibri", "h2_font": "Calibri", "body_font": "Calibri", "data_font": "Calibri"}
+
+    display_font = pal.get("h1_font", "Calibri")
+    heading_font = pal.get("h2_font", display_font)
+    body_font = pal.get("body_font", "Calibri")
+    data_font = pal.get("data_font", body_font)
+
+    aesthetic = structure.get("aesthetic_direction") or {}
+    aesthetic_label = str(aesthetic.get("label") or aesthetic.get("name") or "")
+
     BG    = _rgb(pal["bg"])
     PRI   = _rgb(pal["primary"])
     ACC   = _rgb(pal["accent"])
@@ -1877,11 +2158,12 @@ async def generate_pptx(payload: dict):
     GRAY  = _rgb(pal["gray"])
     CARD  = _rgb(pal["card"])
 
-    deck_title = structure.get("title","Presentation")
+    deck_title = structure.get("title", "Presentation")
 
     for si, slide_data in enumerate(structure["slides"][:slide_count]):
-        stype  = str(slide_data.get("type","bullets")).lower()
-        stitle = str(slide_data.get("title",""))
+        raw_type = str(slide_data.get("type", "stat")).lower()
+        stype  = PPTX_TYPE_TO_LAYOUT.get(raw_type, raw_type)
+        stitle = str(slide_data.get("title", ""))
         slide  = prs.slides.add_slide(prs.slide_layouts[6])  # blank
 
         if stype == "title":
@@ -1890,18 +2172,24 @@ async def generate_pptx(payload: dict):
             circ = slide.shapes.add_shape(9, PPTXInches(9.8), PPTXInches(-1.5), PPTXInches(5.5), PPTXInches(5.5))
             circ.fill.solid(); circ.fill.fore_color.rgb = CARD; circ.line.fill.background()
             circ2 = slide.shapes.add_shape(9, PPTXInches(10.8), PPTXInches(4.5), PPTXInches(3.5), PPTXInches(3.5))
-            circ2.fill.solid(); circ2.fill.fore_color.rgb = _rgb(pal["card"]); circ2.line.fill.background()
+            circ2.fill.solid(); circ2.fill.fore_color.rgb = CARD; circ2.line.fill.background()
 
-            subtitle_txt = str(slide_data.get("subtitle",""))
-            tagline_txt  = str(slide_data.get("tagline",""))
+            subtitle_txt = str(slide_data.get("subtitle", ""))
+            tagline_txt  = str(slide_data.get("tagline", ""))
+            if aesthetic_label and aesthetic_label not in tagline_txt:
+                tagline_txt = f"{aesthetic_label}  ·  {tagline_txt}".strip(" ·")
 
-            _txt(slide, stitle, 0.5, 1.6, 9.5, 2.8, size=48, bold=True, color=WHITE, align=PP_ALIGN.LEFT, font="Calibri")
+            if aesthetic_label:
+                _txt(slide, aesthetic_label.upper(), 0.5, 0.9, 9.5, 0.4, size=9, bold=True,
+                     color=ACC, align=PP_ALIGN.LEFT, font=data_font)
+
+            _txt(slide, stitle, 0.5, 1.6, 9.5, 2.8, size=48, bold=True, color=WHITE, align=PP_ALIGN.LEFT, font=display_font)
             if subtitle_txt:
-                _txt(slide, subtitle_txt, 0.5, 4.6, 9, 0.7, size=22, color=LIGHT, align=PP_ALIGN.LEFT, font="Calibri")
+                _txt(slide, subtitle_txt, 0.5, 4.6, 9, 0.7, size=22, color=LIGHT, align=PP_ALIGN.LEFT, font=body_font)
             _add_rect(slide, 0, 6.8, 13.33, 0.7, CARD)
             if tagline_txt:
-                _txt(slide, tagline_txt, 0.5, 6.82, 10, 0.55, size=12, color=GRAY, align=PP_ALIGN.LEFT, font="Calibri")
-            _txt(slide, f"01/{slide_count:02d}", 12.1, 6.82, 1.0, 0.55, size=11, color=GRAY, align=PP_ALIGN.RIGHT, font="Calibri")
+                _txt(slide, tagline_txt, 0.5, 6.82, 10, 0.55, size=12, color=GRAY, align=PP_ALIGN.LEFT, font=body_font)
+            _txt(slide, f"01/{slide_count:02d}", 12.1, 6.82, 1.0, 0.55, size=11, color=GRAY, align=PP_ALIGN.RIGHT, font=data_font)
 
         elif stype == "closing":
             _add_rect(slide, 0, 0, 13.33, 7.5, BG)
@@ -1909,11 +2197,11 @@ async def generate_pptx(payload: dict):
             circ = slide.shapes.add_shape(9, PPTXInches(8), PPTXInches(0.5), PPTXInches(6), PPTXInches(6))
             circ.fill.solid(); circ.fill.fore_color.rgb = CARD; circ.line.fill.background()
 
-            cta = str(slide_data.get("cta","Thank you."))
-            tagline = str(slide_data.get("tagline",""))
+            cta = str(slide_data.get("cta", "Thank you."))
+            tagline = str(slide_data.get("tagline", ""))
 
-            _txt(slide, "CLOSING", 0.5, 0.6, 5, 0.4, size=10, color=ACC, bold=True, font="Calibri")
-            _txt(slide, stitle, 0.5, 1.2, 9.5, 2.2, size=40, bold=True, color=WHITE, font="Calibri")
+            _txt(slide, "CLOSING", 0.5, 0.6, 5, 0.4, size=10, color=ACC, bold=True, font=data_font)
+            _txt(slide, stitle, 0.5, 1.2, 9.5, 2.2, size=40, bold=True, color=WHITE, font=display_font)
             cta_box = slide.shapes.add_shape(1, PPTXInches(0.5), PPTXInches(3.7), PPTXInches(7.5), PPTXInches(1.0))
             _solid(cta_box, ACC)
             ctf = cta_box.text_frame
@@ -1922,48 +2210,50 @@ async def generate_pptx(payload: dict):
             ctf.paragraphs[0].runs[0].font.size = PPTXPt(18)
             ctf.paragraphs[0].runs[0].font.bold = True
             ctf.paragraphs[0].runs[0].font.color.rgb = BG
-            ctf.paragraphs[0].runs[0].font.name = "Calibri"
+            ctf.paragraphs[0].runs[0].font.name = body_font
             if tagline:
-                _txt(slide, tagline, 0.5, 5.0, 9, 0.6, size=14, color=LIGHT, italic=True, font="Calibri")
+                _txt(slide, tagline, 0.5, 5.0, 9, 0.6, size=14, color=LIGHT, italic=True, font=body_font)
             _add_rect(slide, 0, 6.8, 13.33, 0.7, CARD)
-            _txt(slide, deck_title, 0.5, 6.82, 10, 0.55, size=11, color=GRAY, font="Calibri")
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}", 12.1, 6.82, 1.0, 0.55, size=11, color=GRAY, align=PP_ALIGN.RIGHT, font="Calibri")
+            _txt(slide, deck_title, 0.5, 6.82, 10, 0.55, size=11, color=GRAY, font=body_font)
+            _txt(slide, f"{si+1:02d}/{slide_count:02d}", 12.1, 6.82, 1.0, 0.55, size=11, color=GRAY, align=PP_ALIGN.RIGHT, font=data_font)
 
         elif stype == "bullets":
             _add_rect(slide, 0, 0, 13.33, 7.5, WHITE)
             _add_rect(slide, 0, 0, 13.33, 1.5, PRI)
             _pptx_decor(slide, pal, stype)
-            _txt(slide, f"0{si+1}  \u2022  {stitle.upper()[:40]}", 0.5, 0.08, 12, 0.35, size=9, bold=True, color=ACC, font="Calibri")
-            _txt(slide, stitle, 0.5, 0.35, 12, 1.1, size=28, bold=True, color=WHITE, font="Calibri")
+            _txt(slide, f"0{si+1}  \u2022  {stitle.upper()[:40]}", 0.5, 0.08, 12, 0.35, size=9, bold=True, color=ACC, font=data_font)
+            _txt(slide, stitle, 0.5, 0.35, 12, 1.1, size=28, bold=True, color=WHITE, font=heading_font)
             bullets = slide_data.get("bullets", [])
-            _add_bullets_textbox(slide, bullets, 0.5, 1.8, 12.3, 5.3, size=15, color=PRI, marker="▸", font="Calibri")
+            _add_bullets_textbox(slide, bullets, 0.5, 1.8, 12.3, 5.3, size=15, color=PRI, marker="▸", font=body_font)
             _add_rect(slide, 0, 7.2, 13.33, 0.3, ACC)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font="Calibri")
+            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
 
         elif stype == "two_col":
-            _add_rect(slide, 0, 0, 13.33, 7.5, _rgb((0xF8,0xFA,0xFC)))
+            _add_rect(slide, 0, 0, 13.33, 7.5, _rgb((0xF8, 0xFA, 0xFC)))
             _add_rect(slide, 0, 0, 13.33, 1.35, PRI)
             _pptx_decor(slide, pal, stype)
-            _txt(slide, f"0{si+1}  \u2022  COMPARISON", 0.45, 0.06, 12.4, 0.3, size=9, bold=True, color=ACC, font="Calibri")
-            _txt(slide, stitle, 0.45, 0.30, 12.4, 1.0, size=26, bold=True, color=WHITE, font="Calibri")
+            section_lbl = raw_type.replace("_", " ").upper()[:20] or "COMPARISON"
+            _txt(slide, f"0{si+1}  \u2022  {section_lbl}", 0.45, 0.06, 12.4, 0.3, size=9, bold=True, color=ACC, font=data_font)
+            _txt(slide, stitle, 0.45, 0.30, 12.4, 1.0, size=26, bold=True, color=WHITE, font=heading_font)
             lcard = slide.shapes.add_shape(1, PPTXInches(0.35), PPTXInches(1.55), PPTXInches(6.1), PPTXInches(5.65))
             _solid(lcard, WHITE)
             _add_rect(slide, 0.35, 1.55, 6.1, 0.18, ACC)
             left_pts = slide_data.get("left_points", [])
-            _add_bullets_textbox(slide, left_pts, 0.6, 1.9, 5.7, 5.0, size=14, color=_rgb((0x1E,0x29,0x3B)), marker="→", font="Calibri")
+            _add_bullets_textbox(slide, left_pts, 0.6, 1.9, 5.7, 5.0, size=14, color=_rgb((0x1E, 0x29, 0x3B)), marker="→", font=body_font)
             rcard = slide.shapes.add_shape(1, PPTXInches(6.9), PPTXInches(1.55), PPTXInches(6.1), PPTXInches(5.65))
-            _solid(rcard, _rgb(pal["card"]))
+            _solid(rcard, CARD)
             right_pts = slide_data.get("right_points", [])
-            _add_bullets_textbox(slide, right_pts, 7.1, 1.9, 5.7, 5.0, size=14, color=WHITE, marker="→", font="Calibri")
+            _add_bullets_textbox(slide, right_pts, 7.1, 1.9, 5.7, 5.0, size=14, color=WHITE, marker="→", font=body_font)
             _add_rect(slide, 0, 7.2, 13.33, 0.3, ACC)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font="Calibri")
+            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
 
         elif stype == "stat":
             _add_rect(slide, 0, 0, 13.33, 7.5, BG)
             _add_rect(slide, 0, 0, 0.18, 7.5, ACC)
             _pptx_decor(slide, pal, stype)
-            _txt(slide, f"0{si+1}  \u2022  KEY METRICS", 0.45, 0.12, 12.4, 0.3, size=9, bold=True, color=ACC, font="Calibri")
-            _txt(slide, stitle, 0.45, 0.38, 12.4, 1.0, size=30, bold=True, color=WHITE, font="Calibri")
+            section_lbl = raw_type.replace("_", " ").upper()[:20] or "KEY METRICS"
+            _txt(slide, f"0{si+1}  \u2022  {section_lbl}", 0.45, 0.12, 12.4, 0.3, size=9, bold=True, color=ACC, font=data_font)
+            _txt(slide, stitle, 0.45, 0.38, 12.4, 1.0, size=30, bold=True, color=WHITE, font=heading_font)
             _add_rect(slide, 0.45, 1.42, 8, 0.06, ACC)
             stats_data = slide_data.get("stats", [])[:3]
             card_w, card_h = 3.9, 4.0
@@ -1973,58 +2263,68 @@ async def generate_pptx(payload: dict):
                 card = slide.shapes.add_shape(1, PPTXInches(cx), PPTXInches(1.65), PPTXInches(card_w), PPTXInches(card_h))
                 _solid(card, CARD)
                 _add_rect(slide, cx, 1.65, card_w, 0.2, ACC)
-                num  = str(st.get("number","—"))
-                lbl  = str(st.get("label",""))
-                ctx  = str(st.get("context",""))
-                _txt(slide, num, cx+0.2, 2.05, card_w-0.4, 1.4, size=42, bold=True, color=WHITE, align=PP_ALIGN.CENTER, font="Calibri")
-                _txt(slide, lbl, cx+0.2, 3.55, card_w-0.4, 0.6, size=13, bold=True, color=ACC, align=PP_ALIGN.CENTER, font="Calibri")
-                _txt(slide, ctx, cx+0.2, 4.2, card_w-0.4, 1.3, size=11, color=LIGHT, align=PP_ALIGN.CENTER, font="Calibri")
+                num  = str(st.get("number", "—"))
+                lbl  = str(st.get("label", ""))
+                ctx  = str(st.get("context", ""))
+                _txt(slide, num, cx+0.2, 2.05, card_w-0.4, 1.4, size=42, bold=True, color=WHITE, align=PP_ALIGN.CENTER, font=data_font)
+                _txt(slide, lbl, cx+0.2, 3.55, card_w-0.4, 0.6, size=13, bold=True, color=ACC, align=PP_ALIGN.CENTER, font=heading_font)
+                _txt(slide, ctx, cx+0.2, 4.2, card_w-0.4, 1.3, size=11, color=LIGHT, align=PP_ALIGN.CENTER, font=body_font)
             _add_rect(slide, 0, 7.2, 13.33, 0.3, CARD)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font="Calibri")
+            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
 
         elif stype == "quote":
             _add_rect(slide, 0, 0, 13.33, 7.5, BG)
             _add_rect(slide, 0, 0, 0.18, 7.5, ACC)
-            _txt(slide, "\u201C", 0.4, -0.3, 3, 2.5, size=120, color=CARD, bold=True, font="Georgia")
-            quote_txt  = str(slide_data.get("quote",""))
-            attrib_txt = str(slide_data.get("attribution",""))
+            _txt(slide, "\u201C", 0.4, -0.3, 3, 2.5, size=120, color=CARD, bold=True, font=display_font)
+            quote_txt  = str(slide_data.get("quote", "") or slide_data.get("callout", ""))
+            attrib_txt = str(slide_data.get("attribution", ""))
             qbox = slide.shapes.add_shape(1, PPTXInches(0.8), PPTXInches(1.2), PPTXInches(9.5), PPTXInches(2.8))
             _solid(qbox, CARD)
-            _txt(slide, quote_txt, 1.1, 1.4, 8.9, 2.5, size=20, color=WHITE, italic=True, font="Georgia")
+            _txt(slide, quote_txt, 1.1, 1.4, 8.9, 2.5, size=20, color=WHITE, italic=True, font=display_font)
             if attrib_txt:
-                _txt(slide, attrib_txt, 1.1, 4.2, 9, 0.5, size=13, color=ACC, bold=True, font="Calibri")
-            hi = slide_data.get("highlights",[]) or slide_data.get("bullets",[])
+                _txt(slide, attrib_txt, 1.1, 4.2, 9, 0.5, size=13, color=ACC, bold=True, font=body_font)
+            hi = slide_data.get("highlights", []) or slide_data.get("bullets", [])
             for hj, h in enumerate(hi[:3]):
                 hy = 1.5 + hj * 1.6
                 hbox = slide.shapes.add_shape(1, PPTXInches(10.6), PPTXInches(hy), PPTXInches(2.4), PPTXInches(1.3))
                 _solid(hbox, CARD)
-                _txt(slide, str(h), 10.7, hy+0.1, 2.2, 1.1, size=11, color=WHITE, font="Calibri")
+                _txt(slide, str(h), 10.7, hy+0.1, 2.2, 1.1, size=11, color=WHITE, font=body_font)
             _add_rect(slide, 0, 7.2, 13.33, 0.3, CARD)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font="Calibri")
+            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
 
         elif stype == "image_text":
-            _add_rect(slide, 0, 0, 13.33, 7.5, _rgb((0xF8,0xFA,0xFC)))
+            _add_rect(slide, 0, 0, 13.33, 7.5, _rgb((0xF8, 0xFA, 0xFC)))
             _add_rect(slide, 0, 0, 13.33, 1.35, PRI)
-            _txt(slide, stitle, 0.45, 0.18, 12.4, 1.0, size=26, bold=True, color=WHITE, font="Calibri")
-            body_txt = str(slide_data.get("body",""))
-            _txt(slide, body_txt, 0.45, 1.6, 8.5, 5.5, size=14, color=_rgb((0x1E,0x29,0x3B)), font="Calibri")
+            _txt(slide, stitle, 0.45, 0.18, 12.4, 1.0, size=26, bold=True, color=WHITE, font=heading_font)
+            body_txt = str(slide_data.get("body", ""))
+            _txt(slide, body_txt, 0.45, 1.6, 8.5, 5.5, size=14, color=_rgb((0x1E, 0x29, 0x3B)), font=body_font)
             sbox = slide.shapes.add_shape(1, PPTXInches(9.3), PPTXInches(1.55), PPTXInches(3.7), PPTXInches(5.65))
-            _solid(sbox, _rgb(pal["card"]))
+            _solid(sbox, CARD)
             _add_rect(slide, 9.3, 1.55, 3.7, 0.2, ACC)
-            _txt(slide, "KEY POINTS", 9.4, 1.6, 3.5, 0.5, size=10, bold=True, color=ACC, font="Calibri")
-            hi_pts = slide_data.get("highlights",[])[:4]
-            _add_bullets_textbox(slide, hi_pts, 9.4, 2.15, 3.5, 4.9, size=12, color=WHITE, marker="◆", font="Calibri")
+            _txt(slide, "KEY DATA", 9.4, 1.6, 3.5, 0.5, size=10, bold=True, color=ACC, font=data_font)
+            hi_pts = slide_data.get("highlights", [])[:4]
+            _add_bullets_textbox(slide, hi_pts, 9.4, 2.15, 3.5, 4.9, size=12, color=WHITE, marker="◆", font=body_font)
             _add_rect(slide, 0, 7.2, 13.33, 0.3, ACC)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font="Calibri")
+            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
 
         else:
             _add_rect(slide, 0, 0, 13.33, 7.5, WHITE)
             _add_rect(slide, 0, 0, 13.33, 1.35, PRI)
-            _txt(slide, stitle, 0.45, 0.18, 12.4, 1.0, size=26, bold=True, color=WHITE, font="Calibri")
-            bullets = slide_data.get("bullets",[])
-            _add_bullets_textbox(slide, bullets, 0.5, 1.7, 12.3, 5.3, size=14, color=_rgb((0x1E,0x29,0x3B)), font="Calibri")
+            _txt(slide, stitle, 0.45, 0.18, 12.4, 1.0, size=26, bold=True, color=WHITE, font=heading_font)
+            stats_fb = slide_data.get("stats", [])[:3]
+            if stats_fb:
+                starts = [0.45, 4.6, 8.75]
+                for ci, st in enumerate(stats_fb):
+                    cx = starts[ci]
+                    card = slide.shapes.add_shape(1, PPTXInches(cx), PPTXInches(1.65), PPTXInches(3.9), PPTXInches(4.0))
+                    _solid(card, CARD)
+                    _txt(slide, str(st.get("number", "—")), cx+0.2, 2.0, 3.5, 1.2, size=36, bold=True, color=WHITE, align=PP_ALIGN.CENTER, font=data_font)
+                    _txt(slide, str(st.get("label", "")), cx+0.2, 3.4, 3.5, 0.6, size=12, bold=True, color=ACC, align=PP_ALIGN.CENTER, font=heading_font)
+            else:
+                bullets = slide_data.get("bullets", [])
+                _add_bullets_textbox(slide, bullets, 0.5, 1.7, 12.3, 5.3, size=14, color=_rgb((0x1E, 0x29, 0x3B)), font=body_font)
             _add_rect(slide, 0, 7.2, 13.33, 0.3, ACC)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font="Calibri")
+            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
 
     buffer = io.BytesIO()
     prs.save(buffer)
@@ -2040,36 +2340,90 @@ async def generate_pptx(payload: dict):
 # DOCX GENERATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def call_ai_docx(prompt: str) -> dict:
-    system = """You are a professional document writer and editor. Return ONLY valid JSON, no markdown fences.
+def _parse_output_format(prompt: str) -> str:
+    """Detect desired output from prompt text. Returns pdf|pptx|docx|both."""
+    normalized = prompt.lower()
+    if re.search(r"\b(?:both|pdf\s*\+\s*pptx|pdf\s*and\s*pptx|all\s+formats)\b", normalized):
+        return "both"
+    if re.search(r"\b(?:pptx|powerpoint|presentation|slides?)\b", normalized):
+        return "pptx"
+    if re.search(r"\b(?:docx|word|document)\b", normalized) and "pdf" not in normalized:
+        return "docx"
+    if re.search(r"\b(?:pdf|report)\b", normalized):
+        return "pdf"
+    return "pdf"
 
-Create a polished, comprehensive document. Each section should be detailed and professional.
+
+def _normalize_topic_prompt(prompt: str) -> str:
+    """Strip template placeholders from user prompt."""
+    cleaned = prompt
+    for placeholder in (
+        r"\[INSERT TOPIC\]", r"\[INSERT TOPIC HERE\]",
+        r"\[PDF\s*/\s*PPTX\s*/\s*DOCS/BOTH\]", r"\[PDF\s*/\s*PPTX\]",
+        r"Topic:\s*\[.*?\]", r"Output format:\s*\[.*?\]",
+    ):
+        cleaned = re.sub(placeholder, "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip() or prompt.strip()
+
+
+@app.post("/docs/generate")
+async def generate_document(payload: dict):
+    """Unified endpoint — routes to PDF, PPTX, DOCX, or both based on prompt."""
+    prompt = _normalize_topic_prompt(payload.get("prompt", ""))
+    fmt = payload.get("format") or _parse_output_format(prompt)
+    fmt = str(fmt).lower().strip()
+
+    if fmt == "both":
+        pdf_result = await generate_pdf({"prompt": prompt})
+        pptx_result = await generate_pptx({"prompt": prompt})
+        return {"pdf": pdf_result, "pptx": pptx_result}
+    if fmt in ("pptx", "presentation", "slides"):
+        return await generate_pptx({"prompt": prompt})
+    if fmt in ("docx", "word", "document"):
+        return await generate_docx({"prompt": prompt})
+    return await generate_pdf({"prompt": prompt})
+
+
+async def call_ai_docx(prompt: str) -> dict:
+    core = _creative_director_core("section", 6, "section")
+    system = f"""{core}
+
+Create a polished Word document. Return ONLY valid JSON, no markdown fences.
+
+Adapt the creative director principles to a flowing document (not slides):
+- Include aesthetic_direction and design_system (5 hex colors, typography)
+- Use REAL topic-specific statistics woven into prose
+- NO bullet-list-heavy sections — prefer narrative paragraphs with embedded data
+- Include pull-quotes and a data_table in at least one section
 
 JSON schema:
-{
+{{
   "title": "Document Title",
   "subtitle": "Compelling subtitle",
   "author": "Prepared by AI Document Service",
-  "date": "2025",
-  "abstract": "A 2-3 sentence executive summary or abstract of the whole document.",
+  "date": "2026",
+  "abstract": "2-3 sentence executive summary with at least one real statistic.",
+  "aesthetic_direction": {{"name": "luxury_editorial", "label": "Luxury Editorial", "rationale": "..."}},
+  "design_system": {{
+    "colors": {{"dominant": "#111", "secondary": "#333", "supporting_1": "#666", "supporting_2": "#EEE", "accent": "#C9A84C"}},
+    "typography": {{"h1_font": "Cormorant Garamond", "body_font": "Libre Franklin"}}
+  }},
   "palette": "indigo|teal|crimson|emerald|slate|violet|amber|rose",
   "sections": [
-    {
+    {{
       "heading": "Section Heading",
-      "body": "Rich detailed paragraph content. At least 80 words per section with specific, valuable information.",
-      "callout": "Optional: one important pull-quote or highlighted note for this section.",
-      "subsections": [
-        { "heading": "Subsection Heading", "body": "Subsection content, at least 40 words." }
-      ]
-    }
+      "body": "Rich detailed paragraph, 80+ words with real figures and dates.",
+      "callout": "Optional pull-quote for this section.",
+      "data_table": {{"headers": ["Metric", "Value"], "rows": [["Example", "42%"]]}},
+      "subsections": [{{"heading": "Subsection", "body": "40+ words."}}]
+    }}
   ],
-  "conclusion": "A compelling 2-3 sentence conclusion that ties everything together."
-}
+  "conclusion": "Compelling 2-3 sentence conclusion with forward-looking tone."
+}}
 
 RULES:
-- Every section body: 80+ words
-- 4-7 sections minimum
-- subsections: optional, 0-3 per section
+- 6-8 sections minimum
+- Every section body: 80+ words, topic-specific
 - palette: pick one that emotionally fits the topic"""
 
     raw = await _deepinfra_call([
@@ -2143,12 +2497,18 @@ def _add_pull_quote(doc: Document, text: str, accent_hex: str):
 
 @app.post("/docs/generate/docx")
 async def generate_docx(payload: dict):
-    structure = await call_ai_docx(payload["prompt"])
+    structure = await call_ai_docx(_normalize_topic_prompt(payload["prompt"]))
 
-    pname = str(structure.get("palette","indigo")).lower()
-    pal   = PALETTES.get(pname, PALETTES["indigo"])
-    PRI_HEX  = pal["primary"]
-    ACC_HEX  = pal["accent"]
+    pname = str(structure.get("palette", "indigo")).lower()
+    pal = PALETTES.get(pname, PALETTES["indigo"])
+    if structure.get("design_system"):
+        tokens = _resolve_design_tokens(structure)
+        PRI_HEX = tokens["primary"]
+        ACC_HEX = tokens["accent"]
+        pal = {**pal, "light": tokens["light"]}
+    else:
+        PRI_HEX = pal["primary"]
+        ACC_HEX = pal["accent"]
 
     def hexrgb(h):
         h = h.lstrip('#')
