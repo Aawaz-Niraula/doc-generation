@@ -10,8 +10,12 @@ from pptx.util import Pt as PPTXPt, Inches as PPTXInches, Emu
 from pptx.dml.color import RGBColor as PPTXRGBColor
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Pt as PPTXPt
+from pptx.oxml import parse_xml as pptx_parse_xml
+from pptx.oxml.ns import nsdecls as pptx_nsdecls, qn as pptx_qn
+from pptx.chart.data import CategoryChartData
+from pptx.enum.chart import XL_CHART_TYPE
 from weasyprint import HTML, CSS
-import httpx, io, json, os, re, uuid, math, traceback
+import httpx, io, json, os, re, uuid, math, traceback, random
 from html import escape
 from vercel.blob import AsyncBlobClient
 
@@ -976,6 +980,42 @@ def _visual_panel(P: dict, idx: int, label: str = "") -> str:
 
 # ─── Main renderer ────────────────────────────────────────────────────────────
 
+_PDF_TOKEN_TO_PTYPE = {
+    "cover": "cover", "closing": "closing", "dark": "quote",
+    "tiles": "grid", "timeline": "timeline", "editorial": "editorial",
+}
+
+
+def _vary_pdf_layouts(pages: list, seed: int) -> list:
+    """Assign each interior page a visually distinct layout family, shuffled per document
+    and never repeating back-to-back, so two runs of the same content never match."""
+    rng = random.Random(seed)
+    n = len(pages)
+
+    def compatible(pg: dict) -> list:
+        opts = ["editorial", "tiles", "dark"]
+        if pg.get("steps"):
+            opts.append("timeline")
+        if pg.get("stats"):
+            opts.append("tiles")  # weight toward stat tiles when real numbers exist
+        return opts
+
+    prev = None
+    for i, pg in enumerate(pages):
+        t = str(pg.get("type", "")).lower()
+        if i == 0 or t == "cover":
+            pg["_layout"] = "cover"; prev = "cover"; continue
+        if i == n - 1 or t == "closing":
+            pg["_layout"] = "closing"; prev = "closing"; continue
+        opts = compatible(pg)
+        rng.shuffle(opts)
+        choice = next((o for o in opts if o != prev), opts[0])
+        pg["_layout"] = choice
+        pg["_mirror"] = rng.random() < 0.5
+        prev = choice
+    return pages
+
+
 def render_pdf_html(structure: dict, page_count: int) -> str:
     """Premium editorial PDF renderer — WeasyPrint-safe (block/float/table only, no CSS Grid)."""
     P = _resolve_design_tokens(structure)
@@ -1007,6 +1047,8 @@ html, body {{ margin:0; padding:0; font-family:var(--font-body); color:var(--tex
 .content {{ position:relative; z-index:1; display:block; }}
 .kicker {{ font-family:var(--font-data); font-size:7pt; letter-spacing:.22em; text-transform:uppercase; font-weight:800; color:var(--accent); display:block; }}
 h1,h2,h3 {{ margin:0; font-family:var(--font-display); letter-spacing:-.025em; line-height:1.02; display:block; }}
+.cover h1 {{ bookmark-level:1; bookmark-label:content(text); }}
+.spread h2, .chapter h2, .dark-page h2 {{ bookmark-level:1; bookmark-label:content(text); }}
 p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; display:block; }}
 .folio {{ position:absolute; left:18mm; right:18mm; bottom:10mm; z-index:2; display:block; overflow:hidden; padding-top:3mm; border-top:.35mm solid rgba(0,0,0,.08); font:7pt var(--font-data); color:rgba(0,0,0,.48); letter-spacing:.08em; }}
 .folio.dark {{ border-top-color:rgba(255,255,255,.18); color:rgba(255,255,255,.55); }}
@@ -1029,6 +1071,8 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; display:bloc
 .editorial-split {{ margin-top:9mm; display:block; overflow:hidden; }}
 .editorial-split .main-col {{ float:left; width:105mm; display:block; }}
 .editorial-split .side-col {{ float:right; width:70mm; display:block; }}
+.editorial-split.mirror .main-col {{ float:right; width:105mm; }}
+.editorial-split.mirror .side-col {{ float:left; width:70mm; }}
 .chapter {{ display:block; overflow:hidden; padding:18mm 19mm 24mm; }}
 .chapter-mark {{ float:left; width:31mm; margin-right:9mm; display:block; font:800 31pt var(--font-data); color:var(--accent); letter-spacing:-.08em; border-top:1mm solid var(--accent); padding-top:5mm; }}
 .chapter > .content {{ display:block; overflow:hidden; }}
@@ -1082,8 +1126,13 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; display:bloc
 
     pages = []
     source_pages = structure.get("pages", [])[:page_count]
+    # Per-document randomised, content-aware layout assignment (different every run).
+    _vary_pdf_layouts(source_pages, random.randrange(1 << 30))
     for idx, page in enumerate(source_pages, 1):
-        ptype = PDF_TYPE_TO_LAYOUT.get(str(page.get("type", "")).lower(), str(page.get("type", "")).lower())
+        token = page.get("_layout")
+        ptype = _PDF_TOKEN_TO_PTYPE.get(token) or PDF_TYPE_TO_LAYOUT.get(
+            str(page.get("type", "")).lower(), str(page.get("type", "")).lower())
+        mir = " mirror" if page.get("_mirror") else ""
         eyebrow = escape(_clip_chars(page.get("eyebrow") or f"Section {idx}", 44))
         heading = _clip_words(page.get("heading") or structure.get("title") or "Key Insight", 13)
         heading_html = escape(heading)
@@ -1111,7 +1160,7 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; display:bloc
   <div class="content">
     <div class="kicker">{eyebrow}</div>
     <h2>{heading_html}</h2>
-    <div class="editorial-split">
+    <div class="editorial-split{mir}">
       <div class="main-col"><p>{body}</p><div class="pullquote">{callout}</div><div class="insights">{insights}</div></div>
       <div class="side-col">{visual}</div>
     </div>
@@ -1127,7 +1176,7 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; display:bloc
   <div class="content">
     <div class="kicker">{eyebrow}</div>
     <h2>{heading_html}</h2>
-    <div class="editorial-split">
+    <div class="editorial-split{mir}">
       <div class="main-col"><p class="lede">{body}</p><div class="pullquote">{callout}</div><div class="tile-row">{tiles}</div></div>
       <div class="side-col">{visual}</div>
     </div>
@@ -1145,7 +1194,7 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; display:bloc
     <div class="kicker">{eyebrow}</div>
     <h2>{heading_html}</h2>
     <p class="lede">{body}</p>
-    <div class="editorial-split"><div class="main-col">{visual}</div><div class="side-col"><div class="tile-row">{tiles}</div><div class="pullquote">{callout}</div></div></div>
+    <div class="editorial-split{mir}"><div class="main-col">{visual}</div><div class="side-col"><div class="tile-row">{tiles}</div><div class="pullquote">{callout}</div></div></div>
   </div>
   <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
 </section>""")
@@ -1159,7 +1208,7 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; display:bloc
   <div class="content">
     <div class="kicker">{eyebrow}</div>
     <h2>{heading_html}</h2>
-    <div class="editorial-split"><div class="main-col"><p>{body}</p><div class="pullquote">{callout}</div></div><div class="side-col">{visual}</div></div>
+    <div class="editorial-split{mir}"><div class="main-col"><p>{body}</p><div class="pullquote">{callout}</div></div><div class="side-col">{visual}</div></div>
     <div class="tile-row">{step_tiles}</div>
   </div>
   <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
@@ -1173,7 +1222,7 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; display:bloc
   <div class="content">
     <div class="kicker">{eyebrow}</div>
     <h2>{heading_html}</h2>
-    <div class="editorial-split"><div class="main-col"><p>{body}</p><div class="pullquote">{callout}</div><div class="insights">{insights}</div></div><div class="side-col">{visual}</div></div>
+    <div class="editorial-split{mir}"><div class="main-col"><p>{body}</p><div class="pullquote">{callout}</div><div class="insights">{insights}</div></div><div class="side-col">{visual}</div></div>
   </div>
   <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
 </section>""")
@@ -1435,6 +1484,215 @@ def _pptx_decor(slide, pal, stype):
         circ.fill.solid(); circ.fill.fore_color.rgb = CARD; circ.line.fill.background()
 
 
+# ─── PPTX motion: entrance animations, slide transitions, interactivity ───────
+#
+# python-pptx has no animation API, so we inject the OOXML <p:timing> and
+# <p:transition> trees directly. Effects use nodeType="afterEffect" so the whole
+# slide auto-plays on display (no clicking required), staggered for a build-in feel.
+
+# entrance effect catalog → (animEffect filter, PowerPoint presetID)
+_PPTX_ENTRANCES = {
+    "fade":      ("fade", 10),
+    "wipe_up":   ("wipe(up)", 22),
+    "wipe_right":("wipe(right)", 22),
+    "wipe_left": ("wipe(left)", 22),
+    "blinds":    ("blinds(horizontal)", 3),
+    "dissolve":  ("dissolve", 9),
+    "circle":    ("circle", 5),
+    "diamond":   ("diamond", 7),
+    "wheel":     ("wheel(1)", 21),
+    "plus":      ("plus", 16),
+    "randombar": ("randombar(vertical)", 18),
+    "strips":    ("strips(downRight)", 19),
+}
+
+# slide-to-slide transitions (one chosen per deck for cohesion)
+_PPTX_TRANSITIONS = [
+    '<p:fade/>',
+    '<p:fade thruBlk="1"/>',
+    '<p:push dir="l"/>',
+    '<p:push dir="u"/>',
+    '<p:cover dir="d"/>',
+    '<p:wipe dir="d"/>',
+    '<p:split orient="horz" dir="out"/>',
+    '<p:zoom dir="in"/>',
+    '<p:cut/>',
+]
+
+
+def _anim_effect_par(cid: int, spid: int, delay: int, dur: int, filt: str, preset_id: int) -> str:
+    """One staggered entrance effect for a single shape (3-level cTn nest, PowerPoint style)."""
+    return (
+        f'<p:par><p:cTn id="{cid}" fill="hold">'
+        f'<p:stCondLst><p:cond delay="{delay}"/></p:stCondLst>'
+        f'<p:childTnLst><p:par><p:cTn id="{cid+1}" fill="hold">'
+        f'<p:stCondLst><p:cond delay="0"/></p:stCondLst>'
+        f'<p:childTnLst><p:par>'
+        f'<p:cTn id="{cid+2}" presetID="{preset_id}" presetClass="entr" presetSubtype="0" '
+        f'fill="hold" nodeType="afterEffect">'
+        f'<p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst>'
+        f'<p:set><p:cBhvr>'
+        f'<p:cTn id="{cid+3}" dur="1" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst></p:cTn>'
+        f'<p:tgtEl><p:spTgt spid="{spid}"/></p:tgtEl>'
+        f'<p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst>'
+        f'</p:cBhvr><p:to><p:strVal val="visible"/></p:to></p:set>'
+        f'<p:animEffect transition="in" filter="{filt}"><p:cBhvr>'
+        f'<p:cTn id="{cid+4}" dur="{dur}"/>'
+        f'<p:tgtEl><p:spTgt spid="{spid}"/></p:tgtEl>'
+        f'</p:cBhvr></p:animEffect>'
+        f'</p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par>'
+    )
+
+
+def _build_pptx_timing(specs: list):
+    """specs: list of (spid, delay_ms, dur_ms, filter, preset_id). Returns a <p:timing> element."""
+    cid = 3
+    pars = []
+    for spid, delay, dur, filt, preset in specs:
+        pars.append(_anim_effect_par(cid, spid, delay, dur, filt, preset))
+        cid += 5
+    xml = (
+        f'<p:timing {pptx_nsdecls("p", "a")}><p:tnLst><p:par>'
+        f'<p:cTn id="1" dur="indefinite" restart="never" nodeType="tmRoot"><p:childTnLst>'
+        f'<p:seq concurrent="1" nextAc="seek"><p:cTn id="2" dur="indefinite" nodeType="mainSeq">'
+        f'<p:childTnLst>{"".join(pars)}</p:childTnLst></p:cTn>'
+        f'<p:prevCondLst><p:cond evt="onPrev" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:prevCondLst>'
+        f'<p:nextCondLst><p:cond evt="onNext" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:nextCondLst>'
+        f'</p:seq></p:childTnLst></p:cTn></p:par></p:tnLst></p:timing>'
+    )
+    return pptx_parse_xml(xml)
+
+
+def _set_slide_transition(slide, transition_xml: str, advance_after: float = None):
+    """Inject a <p:transition>. Must be called BEFORE _animate_slide to keep schema order."""
+    adv = ""
+    if advance_after is not None:
+        adv = f'<p:advTm/>'  # placeholder kept off; manual advance preferred
+    xml = f'<p:transition {pptx_nsdecls("p")} spd="med">{transition_xml}</p:transition>'
+    slide._element.append(pptx_parse_xml(xml))
+
+
+def _animate_slide(slide, filt_key: str, max_shapes: int = 9, step: int = 170, dur: int = 460):
+    """Auto-playing staggered entrance for a slide's shapes (background shape stays static)."""
+    shapes = list(slide.shapes)
+    if len(shapes) < 2:
+        return
+    filt, preset = _PPTX_ENTRANCES.get(filt_key, _PPTX_ENTRANCES["fade"])
+    specs = []
+    for i, sh in enumerate(shapes[1:max_shapes + 1]):
+        specs.append((sh.shape_id, 100 + i * step, dur, filt, preset))
+    if specs:
+        slide._element.append(_build_pptx_timing(specs))
+
+
+def _add_nav_controls(slide, prs, idx: int, total: int, pal: dict):
+    """Add subtle clickable prev / home / next chevrons that jump between slides."""
+    ACC = _rgb(pal["accent"])
+    targets = []
+    if idx > 0:
+        targets.append(("‹", idx - 1))           # prev
+    targets.append(("●", 0))                       # home (slide 1)
+    if idx < total - 1:
+        targets.append(("›", idx + 1))           # next
+    bx = 13.33 - 0.05 - len(targets) * 0.42
+    for label, tgt in targets:
+        btn = slide.shapes.add_shape(9, PPTXInches(bx), PPTXInches(7.02), PPTXInches(0.34), PPTXInches(0.34))
+        btn.fill.solid(); btn.fill.fore_color.rgb = ACC
+        btn.line.fill.background()
+        tf = btn.text_frame
+        tf.margin_top = 0; tf.margin_bottom = 0; tf.margin_left = 0; tf.margin_right = 0
+        p = tf.paragraphs[0]; p.alignment = PP_ALIGN.CENTER
+        r = p.add_run(); r.text = label
+        r.font.size = PPTXPt(12); r.font.bold = True
+        r.font.color.rgb = _rgb(pal["white"])
+        try:
+            btn.click_action.target_slide = prs.slides[tgt]
+        except Exception:
+            pass
+        bx += 0.42
+
+
+def _vary_pptx_layouts(slides: list, seed: int) -> list:
+    """Assign a layout to each slide from its *compatible* options, shuffled per deck,
+    so the same content never renders the same way twice and no two neighbours match."""
+    rng = random.Random(seed)
+
+    def compatible(sd: dict) -> list:
+        opts = []
+        if len(_safe_chart_data(sd.get("chart_data") or [])) >= 2:
+            opts.append("chart")
+        if sd.get("stats"):
+            opts.append("stat")
+        if sd.get("left_points") and sd.get("right_points"):
+            opts.append("two_col")
+        if sd.get("quote") or sd.get("callout"):
+            opts.append("quote")
+        if sd.get("body") and sd.get("highlights"):
+            opts.append("image_text")
+        if sd.get("bullets"):
+            opts.append("bullets")
+        if not opts:
+            opts = ["stat", "image_text", "two_col"]
+        return opts
+
+    prev = None
+    for i, sd in enumerate(slides):
+        t = str(sd.get("type", "")).lower()
+        if i == 0 or t == "title":
+            sd["_layout"] = "title"; prev = "title"; continue
+        if i == len(slides) - 1 or t == "closing":
+            sd["_layout"] = "closing"; prev = "closing"; continue
+        opts = compatible(sd)
+        rng.shuffle(opts)
+        choice = next((o for o in opts if o != prev), opts[0])
+        sd["_layout"] = choice
+        prev = choice
+    return slides
+
+
+def _add_native_pptx_chart(slide, chart_data, l, t, w, h, pal, kind="column"):
+    """Add a real, editable PowerPoint chart styled to the deck palette. Returns the frame or None."""
+    pts = _safe_chart_data(chart_data, limit=8)
+    if len(pts) < 2:
+        return None
+    cd = CategoryChartData()
+    cd.categories = [str(lbl)[:14] for lbl, _ in pts]
+    cd.add_series("Series 1", [v for _, v in pts])
+    ctype = XL_CHART_TYPE.LINE_MARKERS if kind == "line" else XL_CHART_TYPE.COLUMN_CLUSTERED
+    frame = slide.shapes.add_chart(ctype, PPTXInches(l), PPTXInches(t), PPTXInches(w), PPTXInches(h), cd)
+    chart = frame.chart
+    ACC = _rgb(pal["accent"]); LIGHT = _rgb(pal["light"]); WHITE = _rgb(pal["white"])
+    body_font = pal.get("data_font", "Calibri")
+    try:
+        chart.has_legend = False
+        chart.has_title = False
+        plot = chart.plots[0]
+        plot.gap_width = 60
+        plot.has_data_labels = True
+        plot.data_labels.font.size = PPTXPt(10)
+        plot.data_labels.font.bold = True
+        plot.data_labels.font.color.rgb = WHITE
+        plot.data_labels.font.name = body_font
+        series = plot.series[0]
+        if kind == "line":
+            series.format.line.color.rgb = ACC
+            series.format.line.width = PPTXPt(2.5)
+        else:
+            series.format.fill.solid()
+            series.format.fill.fore_color.rgb = ACC
+        cat_axis = chart.category_axis
+        cat_axis.tick_labels.font.size = PPTXPt(10)
+        cat_axis.tick_labels.font.color.rgb = LIGHT
+        cat_axis.tick_labels.font.name = body_font
+        cat_axis.format.line.color.rgb = LIGHT
+        val_axis = chart.value_axis
+        val_axis.visible = False
+        val_axis.has_major_gridlines = False
+    except Exception:
+        pass  # styling is best-effort; the chart itself still renders
+    return frame
+
+
 @app.post("/docs/generate/pptx")
 async def generate_pptx(payload: dict):
     prompt = _normalize_topic_prompt(payload["prompt"])
@@ -1470,9 +1728,20 @@ async def generate_pptx(payload: dict):
 
     deck_title = structure.get("title", "Presentation")
 
-    for si, slide_data in enumerate(structure["slides"][:slide_count]):
+    # Per-deck motion identity — chosen randomly so no two generations look alike.
+    deck_seed = random.randrange(1 << 30)
+    motion_rng = random.Random(deck_seed)
+    deck_transition = motion_rng.choice(_PPTX_TRANSITIONS)
+    entrance_keys = list(_PPTX_ENTRANCES.keys())
+    motion_rng.shuffle(entrance_keys)
+
+    # Randomised, content-aware layout assignment (different every run, no repeats).
+    deck_slides = structure["slides"][:slide_count]
+    _vary_pptx_layouts(deck_slides, deck_seed)
+
+    for si, slide_data in enumerate(deck_slides):
         raw_type = str(slide_data.get("type", "stat")).lower()
-        stype  = PPTX_TYPE_TO_LAYOUT.get(raw_type, raw_type)
+        stype  = slide_data.get("_layout") or PPTX_TYPE_TO_LAYOUT.get(raw_type, raw_type)
         stitle = str(slide_data.get("title", ""))
         slide  = prs.slides.add_slide(prs.slide_layouts[6])  # blank
 
@@ -1602,6 +1871,34 @@ async def generate_pptx(payload: dict):
             _add_rect(slide, 0, 7.2, 13.33, 0.3, CARD)
             _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
 
+        elif stype == "chart":
+            _add_rect(slide, 0, 0, 13.33, 7.5, BG)
+            _add_rect(slide, 0, 0, 0.18, 7.5, ACC)
+            section_lbl = raw_type.replace("_", " ").upper()[:20] or "DATA"
+            _txt(slide, f"0{si+1}  •  {section_lbl}", 0.45, 0.12, 12.4, 0.3, size=9, bold=True, color=ACC, font=data_font)
+            _txt(slide, stitle, 0.45, 0.38, 12.4, 1.0, size=30, bold=True, color=WHITE, font=heading_font)
+            _add_rect(slide, 0.45, 1.42, 8, 0.06, ACC)
+            chart_kind = "line" if "trend" in (stitle + raw_type).lower() or "growth" in (stitle + raw_type).lower() else "column"
+            frame = _add_native_pptx_chart(slide, slide_data.get("chart_data"), 0.45, 1.7, 8.4, 5.2, pal, kind=chart_kind)
+            if frame is None:
+                # graceful fallback to stat cards if chart data was unusable
+                stats_data = slide_data.get("stats", [])[:3]
+                for ci, st in enumerate(stats_data):
+                    cx = [0.45, 4.6, 8.75][ci]
+                    card = slide.shapes.add_shape(1, PPTXInches(cx), PPTXInches(1.7), PPTXInches(3.9), PPTXInches(4.0))
+                    _solid(card, CARD)
+                    _txt(slide, str(st.get("number", "—")), cx+0.2, 2.05, 3.5, 1.2, size=40, bold=True, color=WHITE, align=PP_ALIGN.CENTER, font=data_font)
+                    _txt(slide, str(st.get("label", "")), cx+0.2, 3.4, 3.5, 0.6, size=12, bold=True, color=ACC, align=PP_ALIGN.CENTER, font=heading_font)
+            # insight rail on the right
+            scard = slide.shapes.add_shape(1, PPTXInches(9.1), PPTXInches(1.7), PPTXInches(3.8), PPTXInches(5.2))
+            _solid(scard, CARD)
+            _add_rect(slide, 9.1, 1.7, 3.8, 0.2, ACC)
+            _txt(slide, "WHAT IT MEANS", 9.25, 1.95, 3.5, 0.4, size=10, bold=True, color=ACC, font=data_font)
+            rail = slide_data.get("highlights") or [st.get("context", "") for st in slide_data.get("stats", [])][:3]
+            _add_bullets_textbox(slide, [r for r in rail if r][:4], 9.25, 2.5, 3.5, 4.2, size=12, color=WHITE, marker="◆", font=body_font)
+            _add_rect(slide, 0, 7.2, 13.33, 0.3, CARD)
+            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
+
         elif stype == "image_text":
             _add_rect(slide, 0, 0, 13.33, 7.5, _rgb((0xF8, 0xFA, 0xFC)))
             _add_rect(slide, 0, 0, 13.33, 1.35, PRI)
@@ -1635,6 +1932,15 @@ async def generate_pptx(payload: dict):
                 _add_bullets_textbox(slide, bullets, 0.5, 1.7, 12.3, 5.3, size=14, color=_rgb((0x1E, 0x29, 0x3B)), font=body_font)
             _add_rect(slide, 0, 7.2, 13.33, 0.3, ACC)
             _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
+
+        # ── motion: cohesive deck transition + auto-playing staggered entrance ──
+        _set_slide_transition(slide, deck_transition)
+        _animate_slide(slide, entrance_keys[si % len(entrance_keys)])
+
+    # Clickable navigation — added after all slides exist so jump targets resolve.
+    all_slides = list(prs.slides)
+    for ni, slide in enumerate(all_slides):
+        _add_nav_controls(slide, prs, ni, len(all_slides), pal)
 
     buffer = io.BytesIO()
     prs.save(buffer)
@@ -1753,7 +2059,46 @@ def _set_cell_bg(cell, hex_color: str):
     tcPr.append(shd)
 
 
-def _add_docx_heading_band(doc: Document, text: str, bg_hex: str, fg_hex: str, level_pt: int = 14):
+def _set_outline_level(paragraph, level: int):
+    """Tag a paragraph with a Word outline level so it appears in the Navigation pane
+    and is picked up by a TOC field (\\u switch) — independent of paragraph style."""
+    pPr = paragraph._p.get_or_add_pPr()
+    existing = pPr.find(qn('w:outlineLvl'))
+    if existing is not None:
+        pPr.remove(existing)
+    ol = OxmlElement('w:outlineLvl')
+    ol.set(qn('w:val'), str(level))
+    pPr.append(ol)
+
+
+def _add_docx_toc(doc: Document):
+    """Insert a live, clickable Table of Contents field (updates on open / right-click)."""
+    p = doc.add_paragraph()
+    p.paragraph_format.space_after = Pt(6)
+    run = p.add_run()
+    r = run._r
+    begin = OxmlElement('w:fldChar'); begin.set(qn('w:fldCharType'), 'begin')
+    instr = OxmlElement('w:instrText'); instr.set(qn('xml:space'), 'preserve')
+    instr.text = 'TOC \\o "1-3" \\h \\z \\u'
+    sep = OxmlElement('w:fldChar'); sep.set(qn('w:fldCharType'), 'separate')
+    placeholder = OxmlElement('w:t')
+    placeholder.text = "Table of contents — right-click and choose “Update Field”."
+    end = OxmlElement('w:fldChar'); end.set(qn('w:fldCharType'), 'end')
+    for child in (begin, instr, sep, placeholder, end):
+        r.append(child)
+
+
+def _enable_update_fields(doc: Document):
+    """Ask Word to refresh fields (the TOC) automatically when the document opens."""
+    settings = doc.settings.element
+    if settings.find(qn('w:updateFields')) is None:
+        el = OxmlElement('w:updateFields')
+        el.set(qn('w:val'), 'true')
+        settings.append(el)
+
+
+def _add_docx_heading_band(doc: Document, text: str, bg_hex: str, fg_hex: str, level_pt: int = 14,
+                            outline_level: int = None):
     table = doc.add_table(rows=1, cols=1)
     table.style = 'Table Grid'
     cell = table.cell(0, 0)
@@ -1780,6 +2125,8 @@ def _add_docx_heading_band(doc: Document, text: str, bg_hex: str, fg_hex: str, l
     run.font.color.rgb = RGBColor(
         int(fg_hex[1:3],16), int(fg_hex[3:5],16), int(fg_hex[5:7],16)
     )
+    if outline_level is not None:
+        _set_outline_level(p, outline_level)
     doc.add_paragraph()
 
 
@@ -1803,6 +2150,46 @@ def _add_pull_quote(doc: Document, text: str, accent_hex: str):
     left.set(qn('w:color'), accent_hex.lstrip('#'))
     pBdr.append(left)
     pPr.append(pBdr)
+
+
+def _add_docx_data_table(doc: Document, table: dict, header_hex: str, accent_hex: str, alt_hex: str):
+    """Render a clean, banded data table from {headers:[...], rows:[[...]]}."""
+    headers = (table or {}).get("headers") or []
+    rows = (table or {}).get("rows") or []
+    if not headers or not rows:
+        return
+    headers = [str(h) for h in headers[:6]]
+    n = len(headers)
+    t = doc.add_table(rows=1, cols=n)
+    t.style = 'Table Grid'
+    t.autofit = True
+    hdr_cells = t.rows[0].cells
+    for ci, h in enumerate(headers):
+        _set_cell_bg(hdr_cells[ci], header_hex.lstrip('#'))
+        para = hdr_cells[ci].paragraphs[0]
+        para.paragraph_format.space_before = Pt(2)
+        para.paragraph_format.space_after = Pt(2)
+        run = para.add_run(h)
+        run.bold = True
+        run.font.size = Pt(10)
+        run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    for ri, row in enumerate(rows[:12]):
+        cells = t.add_row().cells
+        vals = (list(row) + [""] * n)[:n]
+        for ci, v in enumerate(vals):
+            if ri % 2 == 1:
+                _set_cell_bg(cells[ci], alt_hex.lstrip('#'))
+            para = cells[ci].paragraphs[0]
+            para.paragraph_format.space_before = Pt(2)
+            para.paragraph_format.space_after = Pt(2)
+            run = para.add_run(str(v))
+            run.font.size = Pt(10)
+            run.font.color.rgb = RGBColor(0x1F, 0x2A, 0x3C)
+            if ci == 0:
+                run.bold = True
+                run.font.color.rgb = RGBColor(
+                    int(accent_hex[1:3], 16), int(accent_hex[3:5], 16), int(accent_hex[5:7], 16))
+    doc.add_paragraph()
 
 
 @app.post("/docs/generate/docx")
@@ -1860,7 +2247,13 @@ async def generate_docx(payload: dict):
     sep_cell = sep_table.cell(0,0)
     _set_cell_bg(sep_cell, ACC_HEX.lstrip('#'))
     sep_tbl = sep_table._tbl
-    sep_tblPr = sep_tbl.find(qn('w:tblPr')) or OxmlElement('w:tblPr')
+    sep_tblPr = sep_tbl.find(qn('w:tblPr'))
+    if sep_tblPr is None:
+        sep_tblPr = OxmlElement('w:tblPr')
+        sep_tbl.insert(0, sep_tblPr)  # tblPr must be the first child of w:tbl
+    existing_w = sep_tblPr.find(qn('w:tblW'))
+    if existing_w is not None:
+        sep_tblPr.remove(existing_w)
     tblW = OxmlElement('w:tblW')
     tblW.set(qn('w:w'), '3000')
     tblW.set(qn('w:type'), 'dxa')
@@ -1885,8 +2278,14 @@ async def generate_docx(payload: dict):
 
     doc.add_page_break()
 
+    # Clickable, auto-updating table of contents (driven by paragraph outline levels).
+    if structure.get("sections"):
+        _add_docx_heading_band(doc, "Contents", PRI_HEX, "#FFFFFF", level_pt=14)
+        _add_docx_toc(doc)
+        doc.add_page_break()
+
     if structure.get("abstract"):
-        _add_docx_heading_band(doc, "Executive Summary", PRI_HEX, "#FFFFFF", level_pt=14)
+        _add_docx_heading_band(doc, "Executive Summary", PRI_HEX, "#FFFFFF", level_pt=14, outline_level=0)
         abs_para = doc.add_paragraph(structure["abstract"])
         abs_para.paragraph_format.space_after = Pt(10)
         abs_para.paragraph_format.left_indent = Inches(0.1)
@@ -1900,7 +2299,7 @@ async def generate_docx(payload: dict):
         is_alt = (si % 2 == 1)
         h_bg  = ACC_HEX if is_alt else PRI_HEX
         section_label = f"{si+1:02d}  \u2014  {sec['heading']}"
-        _add_docx_heading_band(doc, section_label, h_bg, "#FFFFFF", level_pt=14)
+        _add_docx_heading_band(doc, section_label, h_bg, "#FFFFFF", level_pt=14, outline_level=0)
 
         body_para = doc.add_paragraph(sec.get("body",""))
         body_para.paragraph_format.space_after  = Pt(10)
@@ -1914,6 +2313,10 @@ async def generate_docx(payload: dict):
         if sec.get("callout"):
             _add_pull_quote(doc, sec["callout"], ACC_HEX)
 
+        if sec.get("data_table"):
+            _add_docx_data_table(doc, sec["data_table"], PRI_HEX, ACC_HEX,
+                                 pal.get("light", "#E0E7FF"))
+
         for sub_idx, sub in enumerate(sec.get("subsections", [])):
             sub_para = doc.add_paragraph()
             sub_para.paragraph_format.space_before = Pt(10)
@@ -1924,6 +2327,7 @@ async def generate_docx(payload: dict):
             sub_run.bold = True
             sub_run.font.size = Pt(12.5)
             sub_run.font.color.rgb = ACC_RGB
+            _set_outline_level(sub_para, 1)
 
             sub_body = doc.add_paragraph(sub.get("body",""))
             sub_body.paragraph_format.space_after = Pt(8)
@@ -1948,7 +2352,7 @@ async def generate_docx(payload: dict):
         pPr_sep.append(pBdr_sep)
 
     if structure.get("conclusion"):
-        _add_docx_heading_band(doc, "Conclusion", PRI_HEX, "#FFFFFF", level_pt=14)
+        _add_docx_heading_band(doc, "Conclusion", PRI_HEX, "#FFFFFF", level_pt=14, outline_level=0)
         conc_para = doc.add_paragraph(structure["conclusion"])
         conc_para.paragraph_format.space_after = Pt(10)
         conc_para.paragraph_format.left_indent = Inches(0.1)
@@ -1956,6 +2360,8 @@ async def generate_docx(payload: dict):
             run.font.size = Pt(11)
             run.font.color.rgb = BODY_RGB
             run.italic = True
+
+    _enable_update_fields(doc)
 
     buffer = io.BytesIO()
     doc.save(buffer)
