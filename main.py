@@ -15,7 +15,7 @@ from pptx.oxml.ns import nsdecls as pptx_nsdecls, qn as pptx_qn
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE
 from weasyprint import HTML, CSS
-import httpx, io, json, os, re, uuid, math, traceback, random
+import httpx, io, json, os, re, uuid, math, traceback, random, asyncio, base64
 from html import escape
 from vercel.blob import AsyncBlobClient
 
@@ -355,6 +355,75 @@ def _google_fonts_link(tokens: dict) -> str:
         return ""
     params = "&".join(f"family={f.replace(' ', '+')}:wght@300;400;500;600;700;800;900" for f in families)
     return f'<link href="https://fonts.googleapis.com/css2?{params}&display=swap" rel="stylesheet"/>'
+
+
+# ─── Real font embedding (self-contained, WeasyPrint-safe) ────────────────────
+#
+# WeasyPrint can mis-parse the Google Fonts CSS endpoint, so instead we fetch the
+# actual static TTF files from the Fontsource CDN and inline them as base64
+# @font-face rules. This makes the AI-chosen typography *actually render* in the
+# PDF (previously it silently fell back to Georgia/Arial, which is the main reason
+# every document looked identical). Fully time-boxed with graceful fallback.
+
+_TTF_MAGIC = (b"\x00\x01\x00\x00", b"true", b"OTTO", b"ttcf")
+_FONTSOURCE = "https://cdn.jsdelivr.net/fontsource/fonts/{slug}@latest/latin-{w}-normal.ttf"
+_FONT_WEIGHTS = {
+    "h1_font":   (700, 800, 900),
+    "h2_font":   (500, 700),
+    "body_font": (400, 600, 700),
+    "data_font": (500, 700),
+}
+# A few common families whose CDN slug differs from a naive lower-hyphen transform.
+_FONT_SLUG_FIXUPS = {
+    "source sans 3": "source-sans-3", "source sans pro": "source-sans-pro",
+    "ibm plex sans": "ibm-plex-sans", "ibm plex mono": "ibm-plex-mono",
+    "pt sans": "pt-sans", "pt serif": "pt-serif",
+}
+
+
+def _font_slug(name: str) -> str:
+    key = " ".join(str(name).strip().lower().split())
+    if key in _FONT_SLUG_FIXUPS:
+        return _FONT_SLUG_FIXUPS[key]
+    return re.sub(r"[^a-z0-9]+", "-", key).strip("-")
+
+
+async def _fetch_one_face(client: httpx.AsyncClient, family: str, weight: int):
+    try:
+        r = await client.get(_FONTSOURCE.format(slug=_font_slug(family), w=weight))
+        if r.status_code == 200 and r.content[:4] in _TTF_MAGIC and len(r.content) < 900_000:
+            b64 = base64.b64encode(r.content).decode("ascii")
+            return (weight, f"@font-face{{font-family:'{family}';font-style:normal;"
+                            f"font-weight:{weight};font-display:swap;"
+                            f"src:url(data:font/ttf;base64,{b64}) format('truetype');}}")
+    except Exception:
+        pass
+    return None
+
+
+async def _build_embedded_font_css(tokens: dict) -> str:
+    """Fetch the resolved typography families as base64 @font-face rules. Returns a
+    <style> block, or '' on any failure so PDF rendering never depends on it."""
+    families = {}
+    for key, weights in _FONT_WEIGHTS.items():
+        fam = str(tokens.get(key, "")).strip()
+        if fam and re.search(r"[A-Za-z]", fam):
+            families.setdefault(fam, set()).update(weights)
+    if not families:
+        return ""
+    jobs = [(fam, w) for fam, ws in families.items() for w in sorted(ws)]
+    try:
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+            results = await asyncio.gather(
+                *[_fetch_one_face(client, fam, w) for fam, w in jobs],
+                return_exceptions=True,
+            )
+    except Exception:
+        return ""
+    faces = [r[1] for r in results if isinstance(r, tuple)]
+    if not faces:
+        return ""
+    return "<style>" + "".join(faces) + "</style>"
 
 
 def _generate_data_table_html(table: dict, P: dict) -> str:
@@ -821,35 +890,61 @@ def _safe_chart_data(chart_data: list, limit: int = 7) -> list:
     return values
 
 
-def _premium_chart_html(data: list, P: dict, title: str = "") -> str:
+def _premium_chart_html(data: list, P: dict, title: str = "", big: bool = False) -> str:
     data = _safe_chart_data(data)
     if not data:
         return ""
     max_val = max((v for _, v in data), default=1) or 1
+    lo = min((v for _, v in data), default=0)
     rows = []
-    for label, val in data:
-        width = max(5, min(100, (val / max_val) * 100))
+    for i, (label, val) in enumerate(data):
+        width = max(7, min(100, (val / max_val) * 100))
+        peak = " peak" if val == max_val else ""
         rows.append(f"""
 <div class="chart-row">
-  <div class="chart-label">{escape(_clip_chars(label, 24))}</div>
-  <div class="chart-track"><div class="chart-bar" style="width:{width:.1f}%"></div></div>
+  <div class="chart-label">{escape(_clip_chars(label, 22))}</div>
+  <div class="chart-track"><div class="chart-bar{peak}" style="width:{width:.1f}%"></div></div>
   <div class="chart-value">{escape(f'{val:g}')}</div>
 </div>""")
+    cls = "premium-chart big" if big else "premium-chart"
+    delta = ""
+    if len(data) >= 2 and data[0][1]:
+        try:
+            chg = (data[-1][1] - data[0][1]) / abs(data[0][1]) * 100
+            arrow = "▲" if chg >= 0 else "▼"
+            delta = f'<span class="chart-delta">{arrow} {abs(chg):.0f}%</span>'
+        except Exception:
+            delta = ""
     return f"""
-<div class="premium-chart">
-  <div class="chart-kicker">{escape(_clip_chars(title or 'Measured Signal', 36))}</div>
-  {"".join(rows)}
+<div class="{cls}">
+  <div class="chart-head"><span class="chart-kicker">{escape(_clip_chars(title or 'Measured signal', 40))}</span>{delta}</div>
+  <div class="chart-rows">{"".join(rows)}</div>
 </div>"""
 
 
 def _premium_stat_html(stat: dict, P: dict) -> str:
+    """Large gradient hero-stat card (used as a page centerpiece)."""
     if not isinstance(stat, dict) or not (stat.get("value") or stat.get("number")):
         return ""
     return f"""
 <div class="premium-stat">
   <div class="premium-stat-value">{escape(str(stat.get("value") or stat.get("number")))}</div>
   <div class="premium-stat-label">{escape(_clip_chars(stat.get("label") or "Key metric", 42))}</div>
-  <p>{escape(_clip_words(stat.get("context") or stat.get("sub") or "", 22))}</p>
+  <p>{escape(_clip_words(stat.get("context") or stat.get("sub") or "", 26))}</p>
+</div>"""
+
+
+def _big_stat_card(stat: dict, P: dict, index: int = 0) -> str:
+    """Tall stat tile with an oversized figure — for stat-grid pages."""
+    val = escape(str(stat.get("value") or stat.get("number") or "—"))
+    lbl = escape(_clip_chars(stat.get("label") or stat.get("value") or "Metric", 24))
+    ctx = escape(_clip_words(stat.get("context") or stat.get("sub") or "", 18))
+    return f"""
+<div class="bigstat">
+  <div class="bigstat-idx">{index+1:02d}</div>
+  <div class="bigstat-val">{val}</div>
+  <div class="bigstat-lbl">{lbl}</div>
+  <div class="bigstat-ctx">{ctx}</div>
 </div>"""
 
 
@@ -862,36 +957,150 @@ def _premium_table_html(table: dict, P: dict) -> str:
         return ""
     hdr = "".join(f"<th>{escape(_clip_chars(h, 22))}</th>" for h in headers[:5])
     body = ""
-    for row in rows[:6]:
+    for row in rows[:7]:
         cells = "".join(
-            f"<td>{escape(_clip_chars(c, 32))}</td>"
+            f"<td>{escape(_clip_chars(c, 34))}</td>"
             for c in (list(row) + [""] * len(headers))[:len(headers[:5])]
         )
         body += f"<tr>{cells}</tr>"
     return f'<table class="premium-table"><thead><tr>{hdr}</tr></thead><tbody>{body}</tbody></table>'
 
 
-def _premium_visual_html(page: dict, P: dict, idx: int, heading: str) -> str:
-    hero = page.get("hero_stat") or {}
-    table = page.get("data_table") or {}
-    chart = page.get("chart_data") or []
+def _geo_panel(P: dict, idx: int, label: str, dark: bool = True, tall: bool = False, variant: int = None) -> str:
+    """Clean, art-directed geometric data-visual that fills a hero or side area
+    (no blurry radial glows). Tall columns use crop-safe centered compositions;
+    wide areas cycle through four distinct data-shaped motifs."""
+    uid = f"gp{idx}"
+    acc, mid, prim = P["accent"], P["mid"], P["primary"]
+    ink = "rgba(255,255,255,.9)" if dark else prim
+    faint = "rgba(255,255,255,.14)" if dark else "rgba(15,23,42,.10)"
+    rng = random.Random(idx * 7 + 3)
+
+    if tall:
+        # Portrait aspect (matches the ~76×150mm side column) with a centered,
+        # crop-safe motif so nothing important is clipped.
+        W, H = 380, 750
+        variant = (idx if variant is None else variant) % 2
+        cx, cy = W / 2, H / 2
+        if variant == 0:  # concentric arcs
+            rings = "".join(
+                f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{r}" fill="none" stroke="{acc}" stroke-width="{w}" opacity="{o}" stroke-dasharray="{d}" stroke-linecap="round"/>'
+                for r, w, o, d in [(160,"2",".16","0"),(128,"16",".26",f"{rng.randint(220,420)} 1200"),(96,"12",".42",f"{rng.randint(150,300)} 1200"),(64,"9",".62",f"{rng.randint(90,220)} 1200")])
+            core = f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="30" fill="{acc}" opacity=".9"/><circle cx="{cx:.0f}" cy="{cy:.0f}" r="15" fill="{"#fff" if dark else prim}" opacity=".9"/>'
+            ticks = "".join(f'<circle cx="{cx + 200*math.cos(math.radians(a)):.0f}" cy="{cy + 200*math.sin(math.radians(a)):.0f}" r="3" fill="{mid}" opacity=".5"/>' for a in range(0, 360, 30))
+            art = ticks + rings + core
+        else:  # stacked horizontal bars
+            n = 7
+            gap = (H - 160) / n
+            bars = ""
+            for i in range(n):
+                bw = rng.randint(120, W - 90)
+                y = 100 + i * gap
+                c = acc if i % 3 == 0 else mid
+                bars += f'<rect x="60" y="{y:.0f}" width="{bw}" height="{gap*0.5:.0f}" rx="6" fill="{c}" opacity="{0.45 + i*0.06:.2f}"/>'
+            art = bars
+    else:
+        W, H = 600, 335
+        variant = ((idx - 1) if variant is None else variant) % 4
+
+    if not tall and variant == 0:  # ascending area + line
+        n = 8
+        ys = []
+        y = H - 90
+        for i in range(n):
+            y = max(70, min(H - 70, y - rng.randint(-8, 46)))
+            ys.append(y)
+        xs = [60 + i * ((W - 120) / (n - 1)) for i in range(n)]
+        line = "M " + " L ".join(f"{x:.0f},{y:.0f}" for x, y in zip(xs, ys))
+        area = f"M {xs[0]:.0f},{H-60} L " + " L ".join(f"{x:.0f},{y:.0f}" for x, y in zip(xs, ys)) + f" L {xs[-1]:.0f},{H-60} Z"
+        grid = "".join(f'<line x1="60" y1="{H-60-i*((H-130)/4):.0f}" x2="{W-40}" y2="{H-60-i*((H-130)/4):.0f}" stroke="{faint}" stroke-width="1"/>' for i in range(5))
+        dots = "".join(f'<circle cx="{x:.0f}" cy="{y:.0f}" r="5" fill="{acc}" stroke="{ "#fff" if dark else prim}" stroke-width="2"/>' for x, y in zip(xs, ys))
+        art = (f'<defs><linearGradient id="{uid}a" x1="0" y1="0" x2="0" y2="1">'
+               f'<stop offset="0%" stop-color="{acc}" stop-opacity=".38"/>'
+               f'<stop offset="100%" stop-color="{acc}" stop-opacity="0"/></linearGradient></defs>'
+               f'{grid}<path d="{area}" fill="url(#{uid}a)"/>'
+               f'<path d="{line}" fill="none" stroke="{acc}" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>{dots}')
+    elif not tall and variant == 1:  # column bars
+        n = 7
+        bw = (W - 130) / n
+        bars = ""
+        for i in range(n):
+            bh = rng.randint(70, H - 130)
+            x = 65 + i * bw
+            y = H - 60 - bh
+            c = acc if i % 3 == 0 else mid
+            bars += f'<rect x="{x:.0f}" y="{y:.0f}" width="{bw*0.62:.0f}" height="{bh}" rx="5" fill="{c}" opacity="{0.55 + i*0.05:.2f}"/>'
+        grid = "".join(f'<line x1="55" y1="{H-60-i*((H-130)/4):.0f}" x2="{W-40}" y2="{H-60-i*((H-130)/4):.0f}" stroke="{faint}" stroke-width="1"/>' for i in range(5))
+        art = f'{grid}{bars}<line x1="55" y1="{H-60}" x2="{W-40}" y2="{H-60}" stroke="{faint}" stroke-width="1.5"/>'
+    elif not tall and variant == 2:  # concentric arcs / radial
+        cx, cy = W/2, H/2 + 6
+        rings = "".join(
+            f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{r}" fill="none" stroke="{acc}" stroke-width="{w}" opacity="{o}" stroke-dasharray="{d}" stroke-linecap="round"/>'
+            for r, w, o, d in [(150,"2",".18","0"),(120,"14",".28",f"{rng.randint(180,320)} 900"),(92,"11",".42",f"{rng.randint(120,240)} 900"),(64,"8",".6",f"{rng.randint(80,180)} 900")])
+        core = f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="30" fill="{acc}" opacity=".9"/><circle cx="{cx:.0f}" cy="{cy:.0f}" r="15" fill="{"#fff" if dark else prim}" opacity=".85"/>'
+        art = rings + core
+    elif not tall:  # node network
+        nodes = [(120,110,15),(260,70,11),(420,120,17),(510,210,12),(360,250,14),(180,250,10),(300,165,20),(470,60,9)]
+        edges = [(0,6),(1,6),(2,6),(2,3),(3,4),(4,5),(5,0),(6,4),(1,2),(2,7)]
+        lines = "".join(f'<line x1="{nodes[a][0]}" y1="{nodes[a][1]}" x2="{nodes[b][0]}" y2="{nodes[b][1]}" stroke="{faint}" stroke-width="1.4"/>' for a, b in edges)
+        dots = "".join(f'<circle cx="{x}" cy="{y}" r="{r}" fill="{acc if i%2==0 else mid}" opacity="{0.5+i*0.05:.2f}"/><circle cx="{x}" cy="{y}" r="{max(3,r-6)}" fill="#fff" opacity=".55"/>' for i,(x,y,r) in enumerate(nodes))
+        art = lines + dots
+
+    bg = (f'<defs><linearGradient id="{uid}bg" x1="0" y1="0" x2="1" y2="1">'
+          f'<stop offset="0%" stop-color="{prim}"/><stop offset="100%" stop-color="{P["card2"]}"/></linearGradient></defs>'
+          f'<rect width="{W}" height="{H}" rx="20" fill="url(#{uid}bg)"/>') if dark else \
+         f'<rect width="{W}" height="{H}" rx="20" fill="{P["wash"]}"/><rect width="{W}" height="{H}" rx="20" fill="none" stroke="{P["light"]}" stroke-width="1.5"/>'
+    lab = (f'<rect x="34" y="34" width="30" height="7" rx="3.5" fill="{acc}"/>'
+           f'<text x="34" y="{H-34}" fill="{ink}" font-family="monospace" font-size="16" font-weight="700" letter-spacing="2">{escape(_clip_chars(label, 34)).upper()}</text>')
+    return (f'<div class="geo-panel"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" '
+            f'preserveAspectRatio="xMidYMid slice">{bg}{art}{lab}</svg></div>')
+
+
+def _hero_visual_html(page: dict, P: dict, idx: int, heading: str, dark: bool = False) -> str:
+    """The dominant, page-filling centerpiece: chart > table > hero-stat > photo > geometric."""
+    chart = _premium_chart_html(page.get("chart_data") or [], P, heading, big=True)
+    if chart:
+        return chart
+    table = _premium_table_html(page.get("data_table") or {}, P)
+    if table:
+        return f'<div class="hero-table">{table}</div>'
+    stat = _premium_stat_html(page.get("hero_stat") or {}, P)
+    if stat:
+        return stat
     image_data = str(page.get("image_data") or "").strip()
-    visual = _premium_stat_html(hero, P)
-    if visual:
-        return visual
-    visual = _premium_table_html(table, P)
-    if visual:
-        return visual
-    visual = _premium_chart_html(chart, P, heading)
-    if visual:
-        return visual
     if image_data:
-        return f'<div class="photo-plate"><img src="{image_data}" alt="" /><div class="photo-caption">{escape(_clip_chars(heading, 70))}</div></div>'
-    return f"""
-<div class="signal-map signal-{idx % 4}">
-  <div></div><div></div><div></div><div></div><div></div>
-  <span>{escape(_clip_chars(heading, 44))}</span>
-</div>"""
+        return f'<div class="photo-plate big"><img src="{image_data}" alt="" /><div class="photo-caption">{escape(_clip_chars(heading, 70))}</div></div>'
+    return _geo_panel(P, idx, heading, dark=True, variant=page.get("_geo"))
+
+
+def _side_visual_html(page: dict, P: dict, idx: int, heading: str, dark: bool = False) -> str:
+    """A visual sized for a narrower side column (chart/stat/table/geometric)."""
+    stat = _premium_stat_html(page.get("hero_stat") or {}, P)
+    if stat:
+        return stat
+    table = _premium_table_html(page.get("data_table") or {}, P)
+    if table:
+        return f'<div class="hero-table">{table}</div>'
+    chart = _premium_chart_html(page.get("chart_data") or [], P, heading, big=False)
+    if chart:
+        return chart
+    image_data = str(page.get("image_data") or "").strip()
+    if image_data:
+        return f'<div class="photo-plate"><img src="{image_data}" alt="" /><div class="photo-caption">{escape(_clip_chars(heading, 60))}</div></div>'
+    return _geo_panel(P, idx, heading, dark=True, tall=True, variant=page.get("_geo"))
+
+
+def _insight_cards(highlights: list, P: dict, limit: int = 3) -> str:
+    """A fixed row of equal-width insight cards (table-cell layout, never wraps)."""
+    items = [h for h in (highlights or []) if str(h).strip()][:limit]
+    if not items:
+        return ""
+    cells = "".join(
+        f'<div class="cell"><div class="ins-card"><span class="ins-num">{i+1:02d}</span>'
+        f'<span class="ins-txt">{escape(_clip_words(str(h), 20))}</span></div></div>'
+        for i, h in enumerate(items)
+    )
+    return f'<div class="trow ins-row">{cells}</div>'
 
 
 def _premium_svg_backdrop(P: dict, idx: int, dark: bool = False) -> str:
@@ -914,109 +1123,72 @@ def _premium_svg_backdrop(P: dict, idx: int, dark: bool = False) -> str:
 </svg>"""
 
 
-def _visual_panel(P: dict, idx: int, label: str = "") -> str:
-    """Generate a decorative SVG visual panel, cycling through 6 distinct styles."""
-    label_text = escape(_clip_chars(label or "Visual Brief", 42))
-    variant = (idx - 1) % 6
-    uid = f"vp{idx}"
-    hdr = (
-        f'<text x="34" y="44" fill="{P["primary"]}" font-family="Helvetica, Arial, sans-serif"'
-        f' font-size="17" font-weight="700" letter-spacing="3">{label_text.upper()}</text>'
-        f'<rect x="34" y="62" width="105" height="5" rx="3" fill="{P["accent"]}" opacity=".75"/>'
-    )
-    bg = f'<rect width="620" height="210" rx="22" fill="{P["wash"]}"/>'
-
-    if variant == 0:
-        grid = "".join(f'<line x1="60" y1="{y}" x2="560" y2="{y}" stroke="{P["light"]}" stroke-width=".5"/>' for y in (75, 115, 155))
-        art = (
-            f'<defs><linearGradient id="{uid}g" x1="0" y1="0" x2="0" y2="1">'
-            f'<stop offset="0%" stop-color="{P["accent"]}" stop-opacity=".30"/>'
-            f'<stop offset="100%" stop-color="{P["wash"]}" stop-opacity=".05"/></linearGradient></defs>'
-            f'{grid}'
-            f'<polygon points="80,172 140,140 200,154 260,110 320,124 380,80 440,98 500,58 560,74 560,200 80,200" fill="url(#{uid}g)"/>'
-            f'<polyline points="80,172 140,140 200,154 260,110 320,124 380,80 440,98 500,58 560,74" fill="none" stroke="{P["accent"]}" stroke-width="3" stroke-linejoin="round"/>'
-            + "".join(f'<circle cx="{x}" cy="{y}" r="4.5" fill="{P["primary"]}" stroke="white" stroke-width="1.5"/>' for x, y in [(140,140),(260,110),(380,80),(500,58),(560,74)])
-        )
-    elif variant == 1:
-        bars_data = [(90,120),(145,90),(200,140),(255,70),(310,105),(365,55),(420,85),(475,65),(530,95)]
-        bars = "".join(f'<rect x="{x}" y="{h}" width="38" height="{195-h}" rx="4" fill="{P["accent"] if i%2==0 else P["mid"]}" opacity=".{65+i*3}"/>' for i,(x,h) in enumerate(bars_data))
-        grid = "".join(f'<line x1="75" y1="{y}" x2="575" y2="{y}" stroke="{P["light"]}" stroke-width=".4"/>' for y in (80, 120, 160))
-        art = f'{grid}{bars}'
-    elif variant == 2:
-        rings = "".join(f'<circle cx="310" cy="115" r="{r}" fill="none" stroke="{P["accent"]}" stroke-width="{w}" opacity="{o}" stroke-dasharray="{d}"/>' for r,w,o,d in [(80,"10",".22","0"),(65,"12",".18","80 200"),(50,"8",".30","120 200"),(35,"6",".40","50 200")])
-        art = (f'{rings}<circle cx="310" cy="115" r="18" fill="{P["primary"]}" opacity=".75"/>'
-               f'<circle cx="310" cy="115" r="10" fill="white" opacity=".9"/>'
-               f'<circle cx="150" cy="150" r="22" fill="{P["mid"]}" opacity=".20"/>'
-               f'<circle cx="480" cy="80" r="30" fill="{P["accent"]}" opacity=".12"/>')
-    elif variant == 3:
-        pts = [(100,150,8),(160,100,11),(230,130,6),(290,70,13),(350,110,7),(420,60,10),(480,90,9),(540,50,6)]
-        circles = "".join(f'<circle cx="{x}" cy="{y}" r="{r}" fill="{P["accent"]}" opacity=".{35+i*7}"/>' for i,(x,y,r) in enumerate(pts))
-        lines = "".join(f'<line x1="{pts[i][0]}" y1="{pts[i][1]}" x2="{pts[i+1][0]}" y2="{pts[i+1][1]}" stroke="{P["mid"]}" stroke-width="1" opacity=".30"/>' for i in range(len(pts)-1))
-        art = f'{lines}{circles}'
-    elif variant == 4:
-        art = (
-            f'<defs><linearGradient id="{uid}w1" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="{P["accent"]}" stop-opacity=".25"/><stop offset="100%" stop-color="{P["mid"]}" stop-opacity=".15"/></linearGradient>'
-            f'<linearGradient id="{uid}w2" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="{P["mid"]}" stop-opacity=".18"/><stop offset="100%" stop-color="{P["soft"]}" stop-opacity=".10"/></linearGradient></defs>'
-            f'<path d="M0,160 C80,100 160,140 240,110 S400,80 480,120 S580,90 620,130 L620,210 L0,210 Z" fill="url(#{uid}w1)"/>'
-            f'<path d="M0,175 C100,130 200,170 300,140 S440,110 530,145 S600,120 620,155 L620,210 L0,210 Z" fill="url(#{uid}w2)"/>'
-            f'<path d="M0,140 C120,90 220,130 340,95 S480,70 560,105 L620,85" fill="none" stroke="{P["accent"]}" stroke-width="2.5" opacity=".55"/>'
-            f'<path d="M0,120 C150,80 280,115 400,75 S550,55 620,90" fill="none" stroke="{P["primary"]}" stroke-width="1.5" opacity=".30"/>')
-    else:
-        nodes = [(110,100,16),(220,60,12),(330,130,18),(430,70,14),(520,110,11),(280,170,10),(460,160,9)]
-        edges = [(0,1),(1,2),(2,3),(3,4),(0,2),(1,3),(2,5),(3,6),(4,6)]
-        lines = "".join(f'<line x1="{nodes[a][0]}" y1="{nodes[a][1]}" x2="{nodes[b][0]}" y2="{nodes[b][1]}" stroke="{P["mid"]}" stroke-width="1.2" opacity=".28"/>' for a,b in edges)
-        dots = "".join(f'<circle cx="{x}" cy="{y}" r="{r}" fill="{P["accent"] if i%2==0 else P["primary"]}" opacity=".{50+i*6}"/><circle cx="{x}" cy="{y}" r="{max(3,r-5)}" fill="white" opacity=".6"/>' for i,(x,y,r) in enumerate(nodes))
-        art = f'{lines}{dots}'
-
-    return f"""
-<div class="visual-panel">
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 210" preserveAspectRatio="none">
-    {bg}
-    {art}
-    {hdr}
-  </svg>
-</div>"""
-
-
 # ─── Main renderer ────────────────────────────────────────────────────────────
 
-_PDF_TOKEN_TO_PTYPE = {
-    "cover": "cover", "closing": "closing", "dark": "quote",
-    "tiles": "grid", "timeline": "timeline", "editorial": "editorial",
-}
+def _real_stats(pg: dict) -> list:
+    return [s for s in (pg.get("stats") or [])
+            if isinstance(s, dict) and str(s.get("number") or s.get("value") or "").strip()]
+
+
+def _page_has_data(pg: dict) -> bool:
+    return bool(
+        len(_safe_chart_data(pg.get("chart_data") or [])) >= 2
+        or (pg.get("data_table") or {}).get("rows")
+        or (pg.get("hero_stat") or {}).get("value")
+        or (pg.get("hero_stat") or {}).get("number")
+    )
 
 
 def _vary_pdf_layouts(pages: list, seed: int) -> list:
-    """Assign each interior page a visually distinct layout family, shuffled per document
-    and never repeating back-to-back, so two runs of the same content never match."""
+    """Assign each interior page a *content-faithful* archetype (so nothing the AI
+    produced is ever dropped), while injecting per-run variety through mirror flips,
+    geometry seeds, and feature↔split alternation on data pages that support both."""
     rng = random.Random(seed)
     n = len(pages)
 
-    def compatible(pg: dict) -> list:
-        opts = ["editorial", "tiles", "dark"]
+    def primary(pg: dict) -> str:
+        t = str(pg.get("type", "")).lower()
+        stats = _real_stats(pg)
         if pg.get("steps"):
-            opts.append("timeline")
-        if pg.get("stats"):
-            opts.append("tiles")  # weight toward stat tiles when real numbers exist
-        return opts
+            return "timeline"
+        if len(stats) >= 2:
+            return "statgrid"
+        if t in ("case_study",) or pg.get("attribution"):
+            return "quote"
+        if _page_has_data(pg):
+            return "feature"
+        if t in ("future", "manifesto") and (pg.get("callout") or pg.get("statements")):
+            return "quote"
+        if len(pg.get("tiles") or []) >= 3:
+            return "cards"
+        if len([h for h in (pg.get("highlights") or []) if str(h).strip()]) >= 3 and not pg.get("body"):
+            return "cards"
+        if pg.get("callout") and not pg.get("body"):
+            return "quote"
+        return "split"
 
     prev = None
     for i, pg in enumerate(pages):
         t = str(pg.get("type", "")).lower()
+        pg["_geo"] = rng.randrange(4)
+        pg["_mirror"] = rng.random() < 0.5
         if i == 0 or t == "cover":
             pg["_layout"] = "cover"; prev = "cover"; continue
         if i == n - 1 or t == "closing":
             pg["_layout"] = "closing"; prev = "closing"; continue
-        opts = compatible(pg)
-        rng.shuffle(opts)
-        choice = next((o for o in opts if o != prev), opts[0])
-        pg["_layout"] = choice
-        pg["_mirror"] = rng.random() < 0.5
-        prev = choice
+        arche = primary(pg)
+        # feature and split both fully present a data+narrative page — alternate for variety.
+        if arche in ("feature", "split") and pg.get("body") and _page_has_data(pg):
+            if prev in ("feature", "split"):
+                arche = "split" if prev == "feature" else "feature"
+            elif rng.random() < 0.42:
+                arche = "split" if arche == "feature" else "feature"
+        pg["_layout"] = arche
+        prev = arche
     return pages
 
 
-def render_pdf_html(structure: dict, page_count: int) -> str:
+def render_pdf_html(structure: dict, page_count: int, font_face_css: str = "") -> str:
     """Premium editorial PDF renderer — WeasyPrint-safe (block/float/table only, no CSS Grid)."""
     P = _resolve_design_tokens(structure)
     title = escape(_clip_chars(structure.get("title") or "Report", 90))
@@ -1025,8 +1197,9 @@ def render_pdf_html(structure: dict, page_count: int) -> str:
     aesthetic = structure.get("aesthetic_direction") or {}
     aesthetic_label = escape(_clip_chars(aesthetic.get("label") or aesthetic.get("name") or "Editorial Intelligence", 42))
     signature = escape(_clip_chars(P.get("signature_element") or "calibrated signal line", 70))
-    # Skip external font CSS — WeasyPrint can mis-parse fetched stylesheets and trigger layout bugs.
-    fonts_link = ""
+    # Real typography is inlined as base64 @font-face rules (see _build_embedded_font_css).
+    # Passed in pre-fetched so the AI-chosen fonts actually render instead of falling back.
+    fonts_link = font_face_css or ""
 
     css = f"""
 @page {{ size: A4; margin: 0; }}
@@ -1036,92 +1209,161 @@ html, body {{ margin:0; padding:0; font-family:var(--font-body); color:var(--tex
   --primary:{P['primary']}; --accent:{P['accent']}; --mid:{P['mid']}; --light:{P['light']};
   --wash:{P['wash']}; --text:{P['text']}; --dark:{P['dark']}; --body:{P['body']};
   --card2:{P['card2']}; --muted:{P['muted']};
-  --font-display:'{P['h1_font']}', Georgia, serif;
-  --font-heading:'{P['h2_font']}', Arial, sans-serif;
-  --font-body:'{P['body_font']}', Arial, sans-serif;
-  --font-data:'{P['data_font']}', 'Courier New', monospace;
+  --font-display:'{P['h1_font']}', Georgia, 'Times New Roman', serif;
+  --font-heading:'{P['h2_font']}', 'Helvetica Neue', Arial, sans-serif;
+  --font-body:'{P['body_font']}', 'Helvetica Neue', Arial, sans-serif;
+  --font-data:'{P['data_font']}', 'SF Mono', 'Courier New', monospace;
 }}
-.page {{ width:210mm; height:297mm; page-break-after:always; break-after:page; position:relative; overflow:hidden; background:#fff; display:block; }}
+.page {{ width:210mm; height:297mm; page-break-after:always; break-after:page; position:relative; overflow:hidden; background:var(--wash); display:block; }}
 .page:last-child {{ page-break-after:auto; break-after:auto; }}
 .premium-backdrop {{ position:absolute; inset:0; width:210mm; height:297mm; z-index:0; display:block; }}
 .content {{ position:relative; z-index:1; display:block; }}
-.kicker {{ font-family:var(--font-data); font-size:7pt; letter-spacing:.22em; text-transform:uppercase; font-weight:800; color:var(--accent); display:block; }}
-h1,h2,h3 {{ margin:0; font-family:var(--font-display); letter-spacing:-.025em; line-height:1.02; display:block; }}
+.kicker {{ font-family:var(--font-data); font-size:7.5pt; letter-spacing:.28em; text-transform:uppercase; font-weight:700; color:var(--accent); display:block; }}
+.kicker b {{ color:var(--muted); font-weight:700; }}
+h1,h2,h3 {{ margin:0; font-family:var(--font-display); letter-spacing:-.02em; line-height:1.03; display:block; font-weight:800; }}
 .cover h1 {{ bookmark-level:1; bookmark-label:content(text); }}
 .spread h2, .chapter h2, .dark-page h2 {{ bookmark-level:1; bookmark-label:content(text); }}
-p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; display:block; }}
-.folio {{ position:absolute; left:18mm; right:18mm; bottom:10mm; z-index:2; display:block; overflow:hidden; padding-top:3mm; border-top:.35mm solid rgba(0,0,0,.08); font:7pt var(--font-data); color:rgba(0,0,0,.48); letter-spacing:.08em; }}
-.folio.dark {{ border-top-color:rgba(255,255,255,.18); color:rgba(255,255,255,.55); }}
-.folio span {{ float:left; display:block; max-width:75%; }}
-.folio b {{ float:right; display:block; color:var(--accent); font-size:8pt; }}
+p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.62; display:block; }}
+
+/* ── running foot ── */
+.folio {{ position:absolute; left:20mm; right:20mm; bottom:11mm; z-index:2; display:block; overflow:hidden; padding-top:3mm; border-top:.35mm solid rgba(0,0,0,.10); font:7pt var(--font-data); color:rgba(0,0,0,.42); letter-spacing:.14em; text-transform:uppercase; }}
+.folio.dark {{ border-top-color:rgba(255,255,255,.18); color:rgba(255,255,255,.5); }}
+.folio span {{ float:left; display:block; max-width:72%; overflow:hidden; }}
+.folio b {{ float:right; display:block; color:var(--accent); font-size:8pt; letter-spacing:.1em; }}
+
+/* ── shared header block ── */
+.doc {{ padding:19mm 20mm 20mm; display:block; }}
+.doc-head {{ display:block; margin-bottom:8mm; }}
+.doc-head .num {{ display:inline-block; font:800 12pt var(--font-data); color:var(--accent); letter-spacing:-.02em; margin-right:4mm; vertical-align:middle; }}
+.doc-head h2 {{ font-size:32pt; color:var(--primary); max-width:172mm; margin:4mm 0 0; }}
+.lede {{ max-width:158mm; margin-top:6mm; font-size:11pt; line-height:1.62; color:var(--body); }}
+.accent-rule {{ display:block; width:22mm; height:1.4mm; background:var(--accent); border-radius:2mm; margin:5mm 0 0; }}
+
+/* ── utility table rows (equal cols, never wrap) ── */
+.trow {{ display:table; width:100%; table-layout:fixed; border-collapse:separate; }}
+.trow > .cell {{ display:table-cell; vertical-align:top; padding-right:5mm; }}
+.trow > .cell:last-child {{ padding-right:0; }}
+
+/* ── cover ── */
 .cover {{ background:var(--dark); color:#fff; }}
-.cover .content {{ padding:24mm 26mm; height:249mm; position:relative; display:block; }}
-.cover-top {{ margin-bottom:10mm; display:block; }}
-.cover-pill {{ display:inline-block; border:1px solid rgba(255,255,255,.22); border-radius:999px; padding:2.2mm 7mm; background:rgba(255,255,255,.08); margin-right:4mm; font:7pt var(--font-data); letter-spacing:.2em; text-transform:uppercase; color:rgba(255,255,255,.72); vertical-align:middle; }}
-.cover-body {{ display:block; min-height:118mm; }}
-.cover h1 {{ max-width:156mm; font-size:55pt; color:#fff; }}
-.cover-sub {{ max-width:132mm; margin-top:8mm; color:rgba(255,255,255,.78); font-size:13.2pt; line-height:1.45; }}
-.cover-callout {{ max-width:122mm; color:rgba(255,255,255,.88); font:italic 14pt Georgia, serif; line-height:1.42; }}
-.cover-meta {{ position:absolute; left:26mm; right:26mm; bottom:0; display:block; overflow:hidden; }}
-.cover-meta > div:first-child {{ float:left; max-width:calc(100% - 52mm); display:block; }}
-.cover-num {{ float:right; display:block; font:800 74pt var(--font-data); color:rgba(255,255,255,.13); letter-spacing:-.08em; line-height:1; }}
-.spread {{ padding:17mm 18mm 24mm; display:block; }}
-.spread h2 {{ font-size:31pt; color:var(--primary); max-width:162mm; margin:5mm 0 7mm; }}
-.lede {{ max-width:150mm; font-size:10.4pt; line-height:1.58; color:#334155; }}
-.editorial-split {{ margin-top:9mm; display:block; overflow:hidden; }}
-.editorial-split .main-col {{ float:left; width:105mm; display:block; }}
-.editorial-split .side-col {{ float:right; width:70mm; display:block; }}
-.editorial-split.mirror .main-col {{ float:right; width:105mm; }}
-.editorial-split.mirror .side-col {{ float:left; width:70mm; }}
-.chapter {{ display:block; overflow:hidden; padding:18mm 19mm 24mm; }}
-.chapter-mark {{ float:left; width:31mm; margin-right:9mm; display:block; font:800 31pt var(--font-data); color:var(--accent); letter-spacing:-.08em; border-top:1mm solid var(--accent); padding-top:5mm; }}
-.chapter > .content {{ display:block; overflow:hidden; }}
-.chapter h2 {{ font-size:28pt; color:var(--primary); margin:4mm 0 7mm; }}
-.dark-page {{ background:var(--dark); color:#fff; padding:20mm 22mm 24mm; display:block; }}
-.dark-page h2 {{ color:#fff; font-size:34pt; max-width:158mm; margin:6mm 0 9mm; }}
-.dark-page p {{ color:rgba(255,255,255,.74); }}
-.dark-page .kicker {{ color:var(--muted); }}
-.pullquote {{ margin-top:8mm; padding:7mm 0 7mm 8mm; border-left:1.4mm solid var(--accent); font:italic 15pt Georgia, serif; line-height:1.35; color:var(--primary); display:block; }}
+.cover .content {{ padding:24mm 24mm; height:297mm; position:relative; display:block; }}
+.cover-top {{ margin-bottom:12mm; display:block; }}
+.cover-pill {{ display:inline-block; border:1px solid rgba(255,255,255,.24); border-radius:999px; padding:2.4mm 7mm; background:rgba(255,255,255,.07); margin-right:4mm; font:7pt var(--font-data); letter-spacing:.24em; text-transform:uppercase; color:rgba(255,255,255,.78); vertical-align:middle; }}
+.cover-body {{ display:block; min-height:120mm; }}
+.cover h1 {{ max-width:168mm; font-size:56pt; color:#fff; line-height:1.0; }}
+.cover-sub {{ max-width:140mm; margin-top:10mm; color:rgba(255,255,255,.8); font-size:14pt; line-height:1.5; font-family:var(--font-heading); }}
+.cover-callout {{ max-width:130mm; color:#fff; font:italic 15pt var(--font-display); line-height:1.4; }}
+.cover-meta {{ position:absolute; left:24mm; right:24mm; bottom:22mm; display:block; overflow:hidden; }}
+.cover-meta > div:first-child {{ float:left; max-width:calc(100% - 56mm); display:block; }}
+.cover-num {{ float:right; display:block; font:800 78pt var(--font-data); color:rgba(255,255,255,.12); letter-spacing:-.08em; line-height:.8; }}
+.cover-author {{ margin-top:8mm; color:rgba(255,255,255,.5); font:7pt var(--font-data); letter-spacing:.2em; text-transform:uppercase; }}
+
+/* ── narrative / body ── */
+.body-col p + p {{ margin-top:4mm; }}
+.pullquote {{ margin-top:8mm; padding:2mm 0 2mm 8mm; border-left:1.4mm solid var(--accent); font:italic 15pt var(--font-display); line-height:1.4; color:var(--primary); display:block; }}
 .dark-page .pullquote {{ color:#fff; border-color:var(--accent); }}
 .insights {{ margin-top:7mm; display:block; }}
-.insight {{ display:block; position:relative; padding:3.8mm 0 3.8mm 5.5mm; border-top:.3mm solid rgba(0,0,0,.10); font-size:9.2pt; line-height:1.38; color:#334155; }}
-.insight:before {{ content:""; position:absolute; left:0; top:5mm; width:3mm; height:3mm; border-radius:50%; background:var(--accent); }}
-.dark-page .insight {{ color:rgba(255,255,255,.76); border-color:rgba(255,255,255,.14); }}
-.premium-stat {{ display:block; background:linear-gradient(140deg,var(--primary),var(--card2) 58%,var(--accent)); color:#fff; padding:9mm; border-radius:3mm; box-shadow:0 10px 30px rgba(15,23,42,.20); }}
-.premium-stat-value {{ display:block; font:800 45pt var(--font-data); letter-spacing:-.05em; line-height:.94; }}
-.premium-stat-label {{ display:block; margin-top:4mm; font:800 8pt var(--font-data); letter-spacing:.16em; text-transform:uppercase; color:rgba(255,255,255,.78); }}
-.premium-stat p {{ margin-top:4mm; color:rgba(255,255,255,.72); font-size:8.8pt; }}
-.premium-chart {{ display:block; background:#101114; color:#fff; padding:7mm; border-radius:3mm; box-shadow:0 10px 24px rgba(15,23,42,.18); }}
-.chart-kicker {{ display:block; font:800 8pt var(--font-data); letter-spacing:.13em; text-transform:uppercase; color:rgba(255,255,255,.75); margin-bottom:5mm; }}
-.chart-row {{ display:table; width:100%; table-layout:fixed; margin:3mm 0; border-collapse:separate; border-spacing:0; }}
-.chart-label {{ display:table-cell; width:32mm; vertical-align:middle; padding-right:2mm; font:7.5pt var(--font-data); color:rgba(255,255,255,.74); }}
-.chart-track {{ display:table-cell; vertical-align:middle; height:4.4mm; background:rgba(255,255,255,.10); border-radius:999px; overflow:hidden; }}
-.chart-value {{ display:table-cell; width:15mm; vertical-align:middle; text-align:right; font:7.5pt var(--font-data); color:#fff; font-weight:800; }}
-.chart-bar {{ display:block; height:4.4mm; background:linear-gradient(90deg,var(--accent),var(--mid)); border-radius:999px; }}
-.premium-table {{ display:table; width:100%; border-collapse:collapse; overflow:hidden; border-radius:3mm; font-size:8.5pt; box-shadow:0 8px 22px rgba(15,23,42,.12); }}
+.insight {{ display:block; position:relative; padding:3.6mm 0 3.6mm 6mm; border-top:.3mm solid rgba(0,0,0,.10); font-size:9.4pt; line-height:1.42; color:var(--body); }}
+.insight:before {{ content:""; position:absolute; left:0; top:4.6mm; width:2.6mm; height:2.6mm; border-radius:50%; background:var(--accent); }}
+.dark-page .insight {{ color:rgba(255,255,255,.78); border-color:rgba(255,255,255,.14); }}
+
+/* ── insight cards row ── */
+.ins-row {{ margin-top:8mm; }}
+.ins-card {{ display:block; background:#fff; border:.3mm solid rgba(15,23,42,.09); border-top:1.4mm solid var(--accent); border-radius:2.4mm; padding:5.5mm 5mm; min-height:33mm; box-shadow:0 10px 26px rgba(15,23,42,.07); }}
+.ins-num {{ display:block; font:800 11pt var(--font-data); color:var(--accent); letter-spacing:-.02em; margin-bottom:3.5mm; }}
+.ins-txt {{ display:block; color:#334155; font:9.6pt/1.5 var(--font-body); }}
+.dark-page .ins-card {{ background:rgba(255,255,255,.05); border-color:rgba(255,255,255,.12); box-shadow:none; }}
+.dark-page .ins-txt {{ color:rgba(255,255,255,.82); }}
+/* takeaway/cards archetype: taller cards that fill the page */
+.cards-hero {{ margin-top:11mm; }}
+.cards-hero .ins-card {{ min-height:132mm; padding:9mm 7mm; border-top-width:2mm; }}
+.cards-hero .ins-num {{ font-size:15pt; margin-bottom:8mm; }}
+.cards-hero .ins-txt {{ font-size:11pt; line-height:1.55; }}
+
+/* ── two-column split (table layout → guaranteed top-alignment) ── */
+.split {{ margin-top:2mm; display:table; width:100%; table-layout:fixed; }}
+.split .main-col {{ display:table-cell; vertical-align:top; }}
+.split .side-col {{ display:table-cell; vertical-align:top; width:78mm; }}
+.split .gut {{ padding-right:9mm; }}
+
+/* ── hero stat card ── */
+.premium-stat {{ display:block; background:linear-gradient(140deg,var(--primary),var(--card2) 60%,var(--accent)); color:#fff; padding:11mm; border-radius:3.5mm; box-shadow:0 16px 40px rgba(15,23,42,.24); min-height:98mm; position:relative; overflow:hidden; }}
+.premium-stat:after {{ content:""; position:absolute; right:-30mm; top:-30mm; width:100mm; height:100mm; border-radius:50%; border:1.2mm solid rgba(255,255,255,.12); }}
+.premium-stat-value {{ display:block; margin-top:20mm; font:800 72pt var(--font-data); letter-spacing:-.05em; line-height:.9; }}
+.premium-stat-label {{ display:block; margin-top:6mm; font:800 9pt var(--font-data); letter-spacing:.2em; text-transform:uppercase; color:rgba(255,255,255,.82); }}
+.premium-stat p {{ margin-top:5mm; max-width:120mm; color:rgba(255,255,255,.76); font-size:10pt; line-height:1.55; }}
+.side-col .premium-stat {{ min-height:150mm; padding:10mm; }}
+.side-col .premium-stat-value {{ margin-top:58mm; font-size:54pt; }}
+
+/* ── chart ── */
+.premium-chart {{ display:block; background:linear-gradient(160deg,#14161c,#0c0d11); color:#fff; padding:9mm 11mm; border-radius:3.5mm; box-shadow:0 16px 40px rgba(15,23,42,.22); }}
+.premium-chart.big {{ min-height:90mm; }}
+.side-col .premium-chart {{ min-height:150mm; }}
+.chart-head {{ display:block; overflow:hidden; margin-bottom:7mm; padding-bottom:4mm; border-bottom:.3mm solid rgba(255,255,255,.12); }}
+.chart-kicker {{ float:left; font:800 8.5pt var(--font-data); letter-spacing:.16em; text-transform:uppercase; color:rgba(255,255,255,.82); max-width:70%; }}
+.chart-delta {{ float:right; font:800 8.5pt var(--font-data); color:var(--accent); letter-spacing:.06em; }}
+.chart-rows {{ display:block; }}
+.chart-row {{ display:table; width:100%; table-layout:fixed; margin:5.2mm 0; border-collapse:separate; border-spacing:0; }}
+.chart-label {{ display:table-cell; width:30mm; vertical-align:middle; padding-right:3mm; font:8pt var(--font-data); color:rgba(255,255,255,.72); }}
+.chart-track {{ display:table-cell; vertical-align:middle; height:6mm; background:rgba(255,255,255,.08); border-radius:999px; overflow:hidden; }}
+.chart-value {{ display:table-cell; width:16mm; vertical-align:middle; text-align:right; font:9pt var(--font-data); color:#fff; font-weight:800; }}
+.chart-bar {{ display:block; height:6mm; background:linear-gradient(90deg,var(--mid),var(--accent)); border-radius:999px; }}
+.chart-bar.peak {{ background:linear-gradient(90deg,var(--accent),#fff); }}
+
+/* ── table ── */
+.hero-table {{ display:block; border-radius:3.5mm; overflow:hidden; box-shadow:0 14px 34px rgba(15,23,42,.12); }}
+.premium-table {{ display:table; width:100%; border-collapse:collapse; overflow:hidden; font-size:9pt; background:#fff; }}
 .premium-table thead {{ display:table-header-group; }}
 .premium-table tbody {{ display:table-row-group; }}
 .premium-table tr {{ display:table-row; }}
-.premium-table th {{ display:table-cell; background:#111; color:#fff; text-align:left; padding:3mm; font:800 7pt var(--font-data); letter-spacing:.08em; text-transform:uppercase; }}
-.premium-table td {{ display:table-cell; padding:3.2mm; border-bottom:.25mm solid rgba(0,0,0,.07); color:#243042; }}
-.premium-table tr:nth-child(even) td {{ background:rgba(0,0,0,.035); }}
-.photo-plate {{ display:block; margin:0; border-radius:3mm; overflow:hidden; position:relative; min-height:63mm; box-shadow:0 12px 34px rgba(15,23,42,.22); background:#111; }}
-.photo-plate img {{ width:100%; height:72mm; object-fit:cover; display:block; }}
-.photo-plate:after {{ content:""; position:absolute; inset:0; background:linear-gradient(180deg,transparent 52%,rgba(0,0,0,.48)); }}
-.photo-caption {{ position:absolute; left:5mm; right:5mm; bottom:4mm; z-index:2; color:#fff; font:7pt var(--font-data); letter-spacing:.12em; text-transform:uppercase; display:block; }}
-.signal-map {{ display:block; height:72mm; position:relative; border-radius:3mm; overflow:hidden; background:radial-gradient(circle at 75% 22%,var(--accent),transparent 24%), linear-gradient(135deg,var(--primary),var(--card2)); box-shadow:0 12px 34px rgba(15,23,42,.18); }}
-.signal-map div {{ position:absolute; border:1px solid rgba(255,255,255,.24); border-radius:50%; display:block; }}
-.signal-map div:nth-child(1) {{ width:55mm;height:55mm;right:-10mm;top:-9mm; }}
-.signal-map div:nth-child(2) {{ width:82mm;height:82mm;left:-18mm;bottom:-22mm; }}
-.signal-map div:nth-child(3) {{ width:34mm;height:34mm;left:48mm;top:18mm; }}
-.signal-map div:nth-child(4) {{ width:115mm;height:1px;left:8mm;top:48mm;border-radius:0;background:rgba(255,255,255,.18); }}
-.signal-map div:nth-child(5) {{ width:1px;height:62mm;right:26mm;top:5mm;border-radius:0;background:rgba(255,255,255,.18); }}
-.signal-map span {{ position:absolute; left:7mm; bottom:6mm; color:#fff; font:800 9pt var(--font-data); letter-spacing:.13em; text-transform:uppercase; max-width:98mm; display:block; }}
-.tile-row {{ margin-top:8mm; display:block; overflow:hidden; }}
-.tile {{ float:left; width:31mm; min-height:38mm; margin:0 4mm 4mm 0; padding:5mm; display:block; background:#fff; border:.35mm solid rgba(0,0,0,.08); border-top:1.2mm solid var(--accent); box-shadow:0 8px 20px rgba(15,23,42,.08); }}
-.tile b {{ display:block; color:var(--primary); font:800 7pt var(--font-data); letter-spacing:.14em; text-transform:uppercase; margin-bottom:3mm; }}
-.tile span {{ display:block; color:#334155; font:10pt var(--font-body); line-height:1.38; }}
-.closing h2 {{ font-size:42pt; }}
+.premium-table th {{ display:table-cell; background:var(--primary); color:#fff; text-align:left; padding:4.5mm 4mm; font:800 7.5pt var(--font-data); letter-spacing:.1em; text-transform:uppercase; }}
+.premium-table td {{ display:table-cell; padding:4.2mm 4mm; border-bottom:.25mm solid rgba(15,23,42,.08); color:#243042; }}
+.premium-table tbody tr:first-child td {{ font-weight:700; }}
+.premium-table tr:nth-child(even) td {{ background:var(--wash); }}
+
+/* ── photo ── */
+.photo-plate {{ display:block; margin:0; border-radius:3.5mm; overflow:hidden; position:relative; box-shadow:0 16px 40px rgba(15,23,42,.22); background:#111; }}
+.photo-plate img {{ width:100%; height:96mm; object-fit:cover; display:block; }}
+.photo-plate.big img {{ height:96mm; }}
+.side-col .photo-plate img {{ height:150mm; }}
+.photo-plate:after {{ content:""; position:absolute; inset:0; background:linear-gradient(180deg,transparent 50%,rgba(0,0,0,.5)); }}
+.photo-caption {{ position:absolute; left:6mm; right:6mm; bottom:5mm; z-index:2; color:#fff; font:7.5pt var(--font-data); letter-spacing:.14em; text-transform:uppercase; display:block; }}
+
+/* ── geometric data panel ── */
+.geo-panel {{ display:block; border-radius:3.5mm; overflow:hidden; box-shadow:0 16px 40px rgba(15,23,42,.2); line-height:0; }}
+.geo-panel svg {{ display:block; width:100%; height:96mm; }}
+.side-col .geo-panel svg {{ height:150mm; }}
+
+/* ── big stat grid ── */
+.stat-row {{ margin-top:9mm; }}
+.bigstat {{ display:block; background:#fff; border:.3mm solid rgba(15,23,42,.08); border-radius:3.5mm; padding:9mm 7mm; min-height:150mm; position:relative; overflow:hidden; box-shadow:0 12px 30px rgba(15,23,42,.08); }}
+.bigstat:before {{ content:""; position:absolute; left:0; top:0; width:100%; height:2mm; background:var(--accent); }}
+.bigstat-idx {{ display:block; font:800 8pt var(--font-data); color:var(--muted); letter-spacing:.16em; }}
+.bigstat-val {{ display:block; margin-top:46mm; font:800 46pt var(--font-display); color:var(--primary); letter-spacing:-.03em; line-height:.92; }}
+.bigstat-lbl {{ display:block; margin-top:6mm; font:800 8pt var(--font-data); letter-spacing:.16em; text-transform:uppercase; color:var(--accent); }}
+.bigstat-ctx {{ display:block; margin-top:5mm; font:9.6pt/1.55 var(--font-body); color:#475569; }}
+
+/* ── timeline ── */
+.tl-row {{ margin-top:9mm; }}
+.tl-card {{ display:block; background:#fff; border:.3mm solid rgba(15,23,42,.08); border-radius:3.5mm; padding:8mm 6mm; min-height:148mm; position:relative; box-shadow:0 12px 30px rgba(15,23,42,.07); }}
+.tl-node {{ display:block; width:9mm; height:9mm; border-radius:50%; background:var(--accent); color:#fff; text-align:center; font:800 8pt/9mm var(--font-data); margin-bottom:6mm; }}
+.tl-date {{ display:block; font:800 12pt var(--font-data); color:var(--primary); letter-spacing:-.02em; }}
+.tl-step {{ display:block; margin-top:2mm; font:800 8pt var(--font-data); letter-spacing:.14em; text-transform:uppercase; color:var(--accent); }}
+.tl-desc {{ display:block; margin-top:4mm; font:9.6pt/1.55 var(--font-body); color:#334155; }}
+
+/* ── dark feature (quote / manifesto) ── */
+.dark-page {{ background:var(--dark); color:#fff; }}
+.dark-page .content {{ padding:22mm 22mm 20mm; display:block; }}
+.dark-page h2 {{ color:#fff; }}
+.dark-page p {{ color:rgba(255,255,255,.76); }}
+.dark-page .kicker {{ color:var(--muted); }}
+.dark-page .doc-head h2 {{ color:#fff; }}
+.giant-quote {{ display:block; margin:14mm 0 0; font:italic 34pt/1.22 var(--font-display); color:#fff; max-width:170mm; letter-spacing:-.01em; }}
+.giant-quote .mark {{ font-size:52pt; color:var(--accent); line-height:0; }}
+.quote-attr {{ display:block; margin-top:10mm; font:800 10pt var(--font-data); letter-spacing:.12em; text-transform:uppercase; color:var(--accent); }}
+
+/* ── closing ── */
+.closing h2 {{ font-size:44pt; }}
 """
 
     pages = []
@@ -1129,18 +1371,22 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; display:bloc
     # Per-document randomised, content-aware layout assignment (different every run).
     _vary_pdf_layouts(source_pages, random.randrange(1 << 30))
     for idx, page in enumerate(source_pages, 1):
-        token = page.get("_layout")
-        ptype = _PDF_TOKEN_TO_PTYPE.get(token) or PDF_TYPE_TO_LAYOUT.get(
-            str(page.get("type", "")).lower(), str(page.get("type", "")).lower())
+        ptype = page.get("_layout") or "split"
         mir = " mirror" if page.get("_mirror") else ""
         eyebrow = escape(_clip_chars(page.get("eyebrow") or f"Section {idx}", 44))
         heading = _clip_words(page.get("heading") or structure.get("title") or "Key Insight", 13)
         heading_html = escape(heading)
-        body = escape(_clip_words(page.get("body") or "", 92 if idx in (1, page_count) else 78))
+        body = escape(_clip_words(page.get("body") or "", 96 if idx in (1, page_count) else 82))
         callout = escape(_clip_words(page.get("callout") or "", 30))
-        highlights = [escape(_clip_words(h, 16)) for h in (page.get("highlights") or [])[:4]]
-        visual = _premium_visual_html(page, P, idx, heading)
+        highlights_raw = [str(h) for h in (page.get("highlights") or []) if str(h).strip()][:4]
+        highlights = [escape(_clip_words(h, 18)) for h in highlights_raw]
         dark = ptype in ("cover", "quote", "manifesto")
+        folio_cls = "folio dark" if dark else "folio"
+        folio = f'<div class="{folio_cls}"><span>{title}</span><b>{idx:02d} / {page_count:02d}</b></div>'
+        head_html = (f'<div class="doc-head"><div class="kicker"><span class="num">{idx:02d}</span>{eyebrow}</div>'
+                     f'<h2>{heading_html}</h2><span class="accent-rule"></span></div>')
+        pullquote = f'<div class="pullquote">{callout}</div>' if callout else ""
+        insights_list = "".join(f'<div class="insight">{h}</div>' for h in highlights)
 
         if ptype == "cover":
             pages.append(f"""
@@ -1149,89 +1395,143 @@ p {{ margin:0; color:var(--body); font-size:10pt; line-height:1.55; display:bloc
   <div class="content">
     <div class="cover-top"><span class="cover-pill">{aesthetic_label}</span><span class="cover-pill">{eyebrow}</span></div>
     <div class="cover-body"><h1>{heading_html}</h1><p class="cover-sub">{subtitle}</p></div>
-    <div class="cover-meta"><div><p class="cover-callout">{callout}</p><p style="margin-top:7mm;color:rgba(255,255,255,.52);font:7pt var(--font-data);letter-spacing:.16em;text-transform:uppercase;">{author} / motif: {signature}</p></div><div class="cover-num">01</div></div>
+    <div class="cover-meta"><div><p class="cover-callout">{callout or subtitle}</p><p class="cover-author">{author} &nbsp;·&nbsp; motif: {signature}</p></div><div class="cover-num">01</div></div>
   </div>
 </section>""")
+
         elif ptype in ("quote", "manifesto"):
-            insights = "".join(f'<div class="insight">{h}</div>' for h in highlights)
+            statements = [str(s) for s in (page.get("statements") or []) if str(s).strip()]
+            chips = _insight_cards(statements or highlights_raw, P, limit=3)
+            attr = escape(_clip_chars(page.get("attribution") or "", 48))
+            quote_text = callout or body
             pages.append(f"""
 <section class="page dark-page">
   {_premium_svg_backdrop(P, idx, dark=True)}
   <div class="content">
-    <div class="kicker">{eyebrow}</div>
-    <h2>{heading_html}</h2>
-    <div class="editorial-split{mir}">
-      <div class="main-col"><p>{body}</p><div class="pullquote">{callout}</div><div class="insights">{insights}</div></div>
-      <div class="side-col">{visual}</div>
-    </div>
+    <div class="doc-head"><div class="kicker"><span class="num" style="color:var(--accent)">{idx:02d}</span>{eyebrow}</div><h2>{heading_html}</h2></div>
+    <div class="giant-quote"><span class="mark">“</span>{quote_text}</div>
+    {f'<div class="quote-attr">{attr}</div>' if attr else ''}
+    {chips}
   </div>
-  <div class="folio dark"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
+  {folio}
 </section>""")
+
         elif ptype == "closing":
-            takeaways = page.get("takeaways") or page.get("highlights") or []
-            tiles = "".join(f'<div class="tile"><b>{i+1:02d}</b><span>{escape(_clip_words(t, 16))}</span></div>' for i, t in enumerate(takeaways[:4]))
+            takeaways = [str(t) for t in (page.get("takeaways") or page.get("statements") or page.get("highlights") or [])]
+            cards = _insight_cards(takeaways, P, limit=3)
             pages.append(f"""
-<section class="page spread closing">
+<section class="page closing" style="background:var(--wash);">
   {_premium_svg_backdrop(P, idx)}
-  <div class="content">
-    <div class="kicker">{eyebrow}</div>
-    <h2>{heading_html}</h2>
-    <div class="editorial-split{mir}">
-      <div class="main-col"><p class="lede">{body}</p><div class="pullquote">{callout}</div><div class="tile-row">{tiles}</div></div>
-      <div class="side-col">{visual}</div>
-    </div>
-  </div>
-  <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
-</section>""")
-        elif ptype in ("grid", "stats"):
-            stats = page.get("stats") or []
-            tiles_source = page.get("tiles") or [{"label": s.get("number", f"{i+1:02d}"), "value": f"{s.get('label','')} {s.get('sub','')}".strip()} for i, s in enumerate(stats[:4])] or [{"label": f"{i+1:02d}", "value": h} for i, h in enumerate(highlights)]
-            tiles = "".join(f'<div class="tile"><b>{escape(_clip_chars(t.get("label","Signal"), 22))}</b><span>{escape(_clip_words(t.get("value",""), 16))}</span></div>' for t in tiles_source[:4])
-            pages.append(f"""
-<section class="page spread">
-  {_premium_svg_backdrop(P, idx)}
-  <div class="content">
-    <div class="kicker">{eyebrow}</div>
-    <h2>{heading_html}</h2>
+  <div class="content doc">
+    <div class="doc-head"><div class="kicker"><span class="num">{idx:02d}</span>{eyebrow}</div><h2>{heading_html}</h2><span class="accent-rule"></span></div>
     <p class="lede">{body}</p>
-    <div class="editorial-split{mir}"><div class="main-col">{visual}</div><div class="side-col"><div class="tile-row">{tiles}</div><div class="pullquote">{callout}</div></div></div>
+    {pullquote}
+    {cards}
   </div>
-  <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
+  {folio}
 </section>""")
+
+        elif ptype == "statgrid":
+            stats = _real_stats(page)[:3]
+            cells = "".join(f'<div class="cell">{_big_stat_card(s, P, i)}</div>' for i, s in enumerate(stats))
+            pages.append(f"""
+<section class="page">
+  {_premium_svg_backdrop(P, idx)}
+  <div class="content doc">
+    {head_html}
+    <p class="lede">{body}</p>
+    <div class="trow stat-row">{cells}</div>
+  </div>
+  {folio}
+</section>""")
+
         elif ptype == "timeline":
             steps = page.get("steps") or []
-            step_tiles = "".join(f'<div class="tile"><b>{escape(_clip_chars(s.get("date") or s.get("step") or f"Phase {i+1}", 24))}</b><span>{escape(_clip_words(s.get("desc") or s.get("step") or "", 18))}</span></div>' for i, s in enumerate(steps[:4]))
+            if not steps:
+                steps = [{"step": h, "desc": "", "date": f"{i+1:02d}"} for i, h in enumerate(highlights_raw)]
+            steps = steps[:4]
+            cells = ""
+            for i, s in enumerate(steps):
+                date = escape(_clip_chars(s.get("date") or f"{i+1:02d}", 16))
+                step = escape(_clip_chars(s.get("step") or f"Phase {i+1}", 22))
+                desc = escape(_clip_words(s.get("desc") or s.get("step") or "", 24))
+                cells += (f'<div class="cell"><div class="tl-card"><span class="tl-node">{i+1}</span>'
+                          f'<span class="tl-date">{date}</span><span class="tl-step">{step}</span>'
+                          f'<span class="tl-desc">{desc}</span></div></div>')
             pages.append(f"""
-<section class="page chapter">
+<section class="page">
   {_premium_svg_backdrop(P, idx)}
-  <div class="chapter-mark">{idx:02d}</div>
-  <div class="content">
-    <div class="kicker">{eyebrow}</div>
-    <h2>{heading_html}</h2>
-    <div class="editorial-split{mir}"><div class="main-col"><p>{body}</p><div class="pullquote">{callout}</div></div><div class="side-col">{visual}</div></div>
-    <div class="tile-row">{step_tiles}</div>
+  <div class="content doc">
+    {head_html}
+    <p class="lede">{body}</p>
+    <div class="trow tl-row">{cells}</div>
   </div>
-  <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
+  {folio}
 </section>""")
-        else:
-            insights = "".join(f'<div class="insight">{h}</div>' for h in highlights)
+
+        elif ptype == "cards":
+            tiles = page.get("tiles") or []
+            if tiles:
+                items = [f"{t.get('value','')}".strip() or f"{t.get('label','')}" for t in tiles[:4]]
+                labels = [str(t.get("label", "") or "").strip() for t in tiles[:4]]
+            else:
+                items = highlights_raw[:4]
+                labels = ["" for _ in items]
+            cells = "".join(
+                f'<div class="cell"><div class="ins-card"><span class="ins-num">{escape(str(labels[i] or f"{i+1:02d}"))}</span>'
+                f'<span class="ins-txt">{escape(_clip_words(str(it), 26))}</span></div></div>'
+                for i, it in enumerate(items)
+            )
             pages.append(f"""
-<section class="page chapter">
+<section class="page">
   {_premium_svg_backdrop(P, idx)}
-  <div class="chapter-mark">{idx:02d}</div>
-  <div class="content">
-    <div class="kicker">{eyebrow}</div>
-    <h2>{heading_html}</h2>
-    <div class="editorial-split{mir}"><div class="main-col"><p>{body}</p><div class="pullquote">{callout}</div><div class="insights">{insights}</div></div><div class="side-col">{visual}</div></div>
+  <div class="content doc">
+    {head_html}
+    <p class="lede">{body}</p>
+    <div class="trow ins-row cards-hero">{cells}</div>
   </div>
-  <div class="folio"><span>{title}</span><b>{idx:02d}/{page_count:02d}</b></div>
+  {folio}
+</section>""")
+
+        elif ptype == "feature":
+            hero = _hero_visual_html(page, P, idx, heading)
+            cards = _insight_cards(highlights_raw, P, limit=3)
+            pages.append(f"""
+<section class="page">
+  {_premium_svg_backdrop(P, idx)}
+  <div class="content doc">
+    {head_html}
+    <p class="lede">{body}</p>
+    <div style="margin-top:8mm">{hero}</div>
+    {cards}
+  </div>
+  {folio}
+</section>""")
+
+        else:  # split — narrative + tall side visual
+            visual = _side_visual_html(page, P, idx, heading)
+            narrative = f'<p>{body}</p>{pullquote}<div class="insights">{insights_list}</div>'
+            if page.get("_mirror"):  # visual on the left, narrative on the right
+                cols = (f'<div class="side-col gut">{visual}</div>'
+                        f'<div class="main-col body-col">{narrative}</div>')
+            else:  # narrative on the left, visual on the right
+                cols = (f'<div class="main-col body-col gut">{narrative}</div>'
+                        f'<div class="side-col">{visual}</div>')
+            pages.append(f"""
+<section class="page">
+  {_premium_svg_backdrop(P, idx)}
+  <div class="content doc">
+    {head_html}
+    <div class="split">{cols}</div>
+  </div>
+  {folio}
 </section>""")
 
     pagination_css = CSS(string="""
         @page { size: A4; margin: 0; }
         .page { page-break-after: always; break-after: page; }
         .page:last-child { page-break-after: auto; break-after: auto; }
-        .premium-stat, .premium-chart, .premium-table, .photo-plate, .signal-map, .tile, .pullquote { break-inside: avoid; page-break-inside: avoid; }
+        .premium-stat, .premium-chart, .premium-table, .photo-plate, .geo-panel, .bigstat, .tl-card, .ins-card, .pullquote { break-inside: avoid; page-break-inside: avoid; }
         h1, h2, h3 { break-after: avoid; page-break-after: avoid; }
         p { orphans: 3; widows: 3; }
     """)
@@ -1271,8 +1571,13 @@ async def generate_pdf(payload: dict):
         prompt = _normalize_topic_prompt(payload["prompt"])
         page_count = requested_count(prompt, "page", default=10, minimum=8, maximum=12)
         structure = await call_ai_pdf(prompt, page_count)
-        await _prefetch_images(structure)
-        html_doc, pagination_css = render_pdf_html(structure, page_count)
+        # Fetch AI-chosen fonts and topic images concurrently (both time-boxed).
+        tokens = _resolve_design_tokens(structure)
+        font_css, _ = await asyncio.gather(
+            _build_embedded_font_css(tokens),
+            _prefetch_images(structure),
+        )
+        html_doc, pagination_css = render_pdf_html(structure, page_count, font_face_css=font_css)
         buffer = io.BytesIO()
         HTML(string=html_doc).write_pdf(buffer, stylesheets=[pagination_css])
         pdf_bytes = buffer.getvalue()
@@ -1388,6 +1693,11 @@ RULES:
     return data
 
 
+def _shade(c: tuple, f: float) -> tuple:
+    """Lighten (f>1) or darken (f<1) an RGB tuple, clamped to 0-255."""
+    return tuple(max(0, min(255, int(round(v * f)))) for v in c)
+
+
 def _hex_to_rgb_tuple(hex_color: str) -> tuple:
     h = str(hex_color).lstrip("#")
     if len(h) != 6:
@@ -1437,6 +1747,68 @@ def _add_rect(slide, l, t, w, h, color, line=False):
     _solid(shape, color)
     if not line:
         shape.line.fill.background()
+    return shape
+
+
+def _grad(shape, c1: tuple, c2: tuple, angle: float = 90.0):
+    """Apply a two-stop linear gradient fill; falls back to solid on any failure."""
+    try:
+        f = shape.fill
+        f.gradient()
+        stops = f.gradient_stops
+        stops[0].color.rgb = _rgb(c1)
+        stops[1].color.rgb = _rgb(c2)
+        try:
+            f.gradient_angle = angle
+        except Exception:
+            pass
+    except Exception:
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = _rgb(c1)
+    shape.line.fill.background()
+    return shape
+
+
+def _add_grad_rect(slide, l, t, w, h, c1, c2, angle=90.0):
+    from pptx.util import Inches as I
+    shape = slide.shapes.add_shape(1, I(l), I(t), I(w), I(h))
+    return _grad(shape, c1, c2, angle)
+
+
+def _soft_shadow(shape, blur_pt=13, dist_pt=7, dir_deg=90, alpha_pct=30, color="0B1220"):
+    """Inject a soft outer drop shadow (python-pptx has no high-level API for it)."""
+    try:
+        spPr = shape._element.spPr
+        old = spPr.find(pptx_qn('a:effectLst'))
+        if old is not None:
+            spPr.remove(old)
+        blur = int(blur_pt * 12700); dist = int(dist_pt * 12700)
+        direction = int(dir_deg * 60000); alpha = int(alpha_pct * 1000)
+        xml = (f'<a:effectLst {pptx_nsdecls("a")}>'
+               f'<a:outerShdw blurRad="{blur}" dist="{dist}" dir="{direction}" rotWithShape="0">'
+               f'<a:srgbClr val="{color}"><a:alpha val="{alpha}"/></a:srgbClr>'
+               f'</a:outerShdw></a:effectLst>')
+        spPr.append(pptx_parse_xml(xml))
+    except Exception:
+        pass
+    return shape
+
+
+def _round_rect(slide, l, t, w, h, color=None, grad=None, shadow=True, radius=0.08):
+    """A rounded rectangle card with optional gradient fill + soft shadow."""
+    from pptx.util import Inches as I
+    shape = slide.shapes.add_shape(5, I(l), I(t), I(w), I(h))  # 5 = ROUNDED_RECTANGLE
+    try:
+        shape.adjustments[0] = radius
+    except Exception:
+        pass
+    if grad is not None:
+        _grad(shape, grad[0], grad[1], grad[2] if len(grad) > 2 else 90.0)
+    else:
+        _solid(shape, _rgb(color))
+        shape.line.fill.background()
+    if shadow:
+        _soft_shadow(shape)
     return shape
 
 def _txt(slide, text, l, t, w, h, size=16, bold=False, color=None, align=PP_ALIGN.LEFT,
@@ -1745,193 +2117,186 @@ async def generate_pptx(payload: dict):
         stitle = str(slide_data.get("title", ""))
         slide  = prs.slides.add_slide(prs.slide_layouts[6])  # blank
 
+        # palette tuples + derived shades for gradients
+        BGT, CARDT, ACCT, LIGHTT = pal["bg"], pal["card"], pal["accent"], pal["light"]
+        PANEL = (0x0F, 0x12, 0x18)  # near-black data panel
+        LIGHT_BG1, LIGHT_BG2 = (0xFF, 0xFF, 0xFF), (0xEE, 0xF1, 0xF7)
+        INK = (0x1B, 0x24, 0x33)
+
+        def dark_bg():
+            _add_grad_rect(slide, 0, 0, 13.33, 7.5, _shade(BGT, 0.66), BGT, 125)
+            _add_rect(slide, 0, 0, 0.16, 7.5, ACC)
+
+        def light_bg():
+            _add_grad_rect(slide, 0, 0, 13.33, 7.5, LIGHT_BG1, LIGHT_BG2, 125)
+
+        def dark_footer():
+            _add_rect(slide, 0, 7.24, 13.33, 0.02, ACC)
+            _txt(slide, deck_title.upper(), 0.55, 7.02, 9, 0.3, size=8, color=GRAY, font=data_font)
+            _txt(slide, f"{si+1:02d} / {slide_count:02d}", 11.9, 7.02, 0.9, 0.3, size=8, color=ACC, align=PP_ALIGN.RIGHT, font=data_font)
+
+        def light_footer():
+            _add_rect(slide, 0.55, 7.16, 12.23, 0.014, _rgb(_shade(LIGHTT, 0.9)))
+            _txt(slide, deck_title.upper(), 0.55, 7.0, 9, 0.3, size=8, color=GRAY, font=data_font)
+            _txt(slide, f"{si+1:02d} / {slide_count:02d}", 11.9, 7.0, 0.9, 0.3, size=8, color=ACC, align=PP_ALIGN.RIGHT, font=data_font)
+
+        def eyebrow(text):
+            _txt(slide, f"{si+1:02d}   {text}", 0.6, 0.5, 12, 0.32, size=9.5, bold=True, color=ACC, font=data_font)
+
+        section_lbl = raw_type.replace("_", " ").upper()[:22]
+
         if stype == "title":
-            _add_rect(slide, 0, 0, 13.33, 7.5, BG)
-            _add_rect(slide, 0, 0, 0.18, 7.5, ACC)
-            circ = slide.shapes.add_shape(9, PPTXInches(9.8), PPTXInches(-1.5), PPTXInches(5.5), PPTXInches(5.5))
-            circ.fill.solid(); circ.fill.fore_color.rgb = CARD; circ.line.fill.background()
-            circ2 = slide.shapes.add_shape(9, PPTXInches(10.8), PPTXInches(4.5), PPTXInches(3.5), PPTXInches(3.5))
-            circ2.fill.solid(); circ2.fill.fore_color.rgb = CARD; circ2.line.fill.background()
+            _add_grad_rect(slide, 0, 0, 13.33, 7.5, _shade(BGT, 0.6), BGT, 120)
+            _add_rect(slide, 0, 0, 0.16, 7.5, ACC)
+            ring = slide.shapes.add_shape(9, PPTXInches(9.4), PPTXInches(-1.8), PPTXInches(6.2), PPTXInches(6.2))
+            _grad(ring, _shade(CARDT, 1.12), CARDT, 120); _soft_shadow(ring, blur_pt=24, dist_pt=0, alpha_pct=22)
+            ring2 = slide.shapes.add_shape(9, PPTXInches(11.1), PPTXInches(4.7), PPTXInches(3.4), PPTXInches(3.4))
+            _grad(ring2, ACCT, _shade(ACCT, 0.7), 120); _soft_shadow(ring2, blur_pt=18, dist_pt=0, alpha_pct=26)
 
             subtitle_txt = str(slide_data.get("subtitle", ""))
             tagline_txt  = str(slide_data.get("tagline", ""))
             if aesthetic_label and aesthetic_label not in tagline_txt:
-                tagline_txt = f"{aesthetic_label}  ·  {tagline_txt}".strip(" ·")
-
+                tagline_txt = f"{aesthetic_label}  |  {tagline_txt}".strip(" |")
             if aesthetic_label:
-                _txt(slide, aesthetic_label.upper(), 0.5, 0.9, 9.5, 0.4, size=9, bold=True,
-                     color=ACC, align=PP_ALIGN.LEFT, font=data_font)
-
-            _txt(slide, stitle, 0.5, 1.6, 9.5, 2.8, size=48, bold=True, color=WHITE, align=PP_ALIGN.LEFT, font=display_font)
+                _txt(slide, aesthetic_label.upper(), 0.62, 1.0, 9.5, 0.4, size=10, bold=True, color=ACC, font=data_font)
+            _txt(slide, stitle, 0.58, 1.72, 9.6, 3.1, size=47, bold=True, color=WHITE, font=display_font)
             if subtitle_txt:
-                _txt(slide, subtitle_txt, 0.5, 4.6, 9, 0.7, size=22, color=LIGHT, align=PP_ALIGN.LEFT, font=body_font)
-            _add_rect(slide, 0, 6.8, 13.33, 0.7, CARD)
+                _txt(slide, subtitle_txt, 0.62, 4.95, 9.2, 1.1, size=20, color=LIGHT, font=body_font)
+            _add_rect(slide, 0.62, 6.55, 0.9, 0.05, ACC)
             if tagline_txt:
-                _txt(slide, tagline_txt, 0.5, 6.82, 10, 0.55, size=12, color=GRAY, align=PP_ALIGN.LEFT, font=body_font)
-            _txt(slide, f"01/{slide_count:02d}", 12.1, 6.82, 1.0, 0.55, size=11, color=GRAY, align=PP_ALIGN.RIGHT, font=data_font)
+                _txt(slide, tagline_txt, 0.62, 6.72, 11, 0.5, size=11.5, color=GRAY, font=body_font)
+            _txt(slide, f"01 / {slide_count:02d}", 11.9, 6.72, 0.9, 0.4, size=11, color=GRAY, align=PP_ALIGN.RIGHT, font=data_font)
 
         elif stype == "closing":
-            _add_rect(slide, 0, 0, 13.33, 7.5, BG)
-            _add_rect(slide, 0, 0, 0.18, 7.5, ACC)
-            circ = slide.shapes.add_shape(9, PPTXInches(8), PPTXInches(0.5), PPTXInches(6), PPTXInches(6))
-            circ.fill.solid(); circ.fill.fore_color.rgb = CARD; circ.line.fill.background()
-
+            _add_grad_rect(slide, 0, 0, 13.33, 7.5, _shade(BGT, 0.6), BGT, 120)
+            _add_rect(slide, 0, 0, 0.16, 7.5, ACC)
+            ring = slide.shapes.add_shape(9, PPTXInches(8.2), PPTXInches(0.4), PPTXInches(6.2), PPTXInches(6.2))
+            _grad(ring, _shade(CARDT, 1.1), CARDT, 120); _soft_shadow(ring, blur_pt=24, dist_pt=0, alpha_pct=22)
             cta = str(slide_data.get("cta", "Thank you."))
             tagline = str(slide_data.get("tagline", ""))
-
-            _txt(slide, "CLOSING", 0.5, 0.6, 5, 0.4, size=10, color=ACC, bold=True, font=data_font)
-            _txt(slide, stitle, 0.5, 1.2, 9.5, 2.2, size=40, bold=True, color=WHITE, font=display_font)
-            cta_box = slide.shapes.add_shape(1, PPTXInches(0.5), PPTXInches(3.7), PPTXInches(7.5), PPTXInches(1.0))
-            _solid(cta_box, ACC)
-            ctf = cta_box.text_frame
+            _txt(slide, "IN CLOSING", 0.62, 0.7, 5, 0.4, size=10, color=ACC, bold=True, font=data_font)
+            _txt(slide, stitle, 0.58, 1.5, 9.4, 2.6, size=40, bold=True, color=WHITE, font=display_font)
+            cta_box = _round_rect(slide, 0.6, 4.35, 7.6, 1.05, grad=(ACCT, _shade(ACCT, 0.82), 90), shadow=True, radius=0.16)
+            ctf = cta_box.text_frame; ctf.word_wrap = True
             ctf.paragraphs[0].text = cta
             ctf.paragraphs[0].alignment = PP_ALIGN.CENTER
-            ctf.paragraphs[0].runs[0].font.size = PPTXPt(18)
-            ctf.paragraphs[0].runs[0].font.bold = True
-            ctf.paragraphs[0].runs[0].font.color.rgb = BG
-            ctf.paragraphs[0].runs[0].font.name = body_font
+            r0 = ctf.paragraphs[0].runs[0]
+            r0.font.size = PPTXPt(17); r0.font.bold = True
+            r0.font.color.rgb = _rgb(_shade(BGT, 0.8)); r0.font.name = body_font
             if tagline:
-                _txt(slide, tagline, 0.5, 5.0, 9, 0.6, size=14, color=LIGHT, italic=True, font=body_font)
-            _add_rect(slide, 0, 6.8, 13.33, 0.7, CARD)
-            _txt(slide, deck_title, 0.5, 6.82, 10, 0.55, size=11, color=GRAY, font=body_font)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}", 12.1, 6.82, 1.0, 0.55, size=11, color=GRAY, align=PP_ALIGN.RIGHT, font=data_font)
+                _txt(slide, tagline, 0.62, 5.65, 9, 0.6, size=13.5, color=LIGHT, italic=True, font=body_font)
+            dark_footer()
 
         elif stype == "bullets":
-            _add_rect(slide, 0, 0, 13.33, 7.5, WHITE)
-            _add_rect(slide, 0, 0, 13.33, 1.5, PRI)
-            _pptx_decor(slide, pal, stype)
-            _txt(slide, f"0{si+1}  \u2022  {stitle.upper()[:40]}", 0.5, 0.08, 12, 0.35, size=9, bold=True, color=ACC, font=data_font)
-            _txt(slide, stitle, 0.5, 0.35, 12, 1.1, size=28, bold=True, color=WHITE, font=heading_font)
+            light_bg()
+            eyebrow(stitle.upper()[:44])
+            _txt(slide, stitle, 0.58, 0.92, 12, 1.1, size=30, bold=True, color=_rgb(BGT), font=heading_font)
+            _add_rect(slide, 0.62, 1.95, 0.9, 0.05, ACC)
             bullets = slide_data.get("bullets", [])
-            _add_bullets_textbox(slide, bullets, 0.5, 1.8, 12.3, 5.3, size=15, color=PRI, marker="▸", font=body_font)
-            _add_rect(slide, 0, 7.2, 13.33, 0.3, ACC)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
+            _add_bullets_textbox(slide, bullets, 0.6, 2.35, 12.1, 4.5, size=15, color=_rgb(INK), marker="▸", font=body_font)
+            light_footer()
 
         elif stype == "two_col":
-            _add_rect(slide, 0, 0, 13.33, 7.5, _rgb((0xF8, 0xFA, 0xFC)))
-            _add_rect(slide, 0, 0, 13.33, 1.35, PRI)
-            _pptx_decor(slide, pal, stype)
-            section_lbl = raw_type.replace("_", " ").upper()[:20] or "COMPARISON"
-            _txt(slide, f"0{si+1}  \u2022  {section_lbl}", 0.45, 0.06, 12.4, 0.3, size=9, bold=True, color=ACC, font=data_font)
-            _txt(slide, stitle, 0.45, 0.30, 12.4, 1.0, size=26, bold=True, color=WHITE, font=heading_font)
-            lcard = slide.shapes.add_shape(1, PPTXInches(0.35), PPTXInches(1.55), PPTXInches(6.1), PPTXInches(5.65))
-            _solid(lcard, WHITE)
-            _add_rect(slide, 0.35, 1.55, 6.1, 0.18, ACC)
-            left_pts = slide_data.get("left_points", [])
-            _add_bullets_textbox(slide, left_pts, 0.6, 1.9, 5.7, 5.0, size=14, color=_rgb((0x1E, 0x29, 0x3B)), marker="→", font=body_font)
-            rcard = slide.shapes.add_shape(1, PPTXInches(6.9), PPTXInches(1.55), PPTXInches(6.1), PPTXInches(5.65))
-            _solid(rcard, CARD)
-            right_pts = slide_data.get("right_points", [])
-            _add_bullets_textbox(slide, right_pts, 7.1, 1.9, 5.7, 5.0, size=14, color=WHITE, marker="→", font=body_font)
-            _add_rect(slide, 0, 7.2, 13.33, 0.3, ACC)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
+            light_bg()
+            eyebrow(section_lbl or "COMPARISON")
+            _txt(slide, stitle, 0.58, 0.92, 12.2, 1.0, size=27, bold=True, color=_rgb(BGT), font=heading_font)
+            _round_rect(slide, 0.55, 2.0, 6.05, 4.85, grad=(LIGHT_BG1, _shade(LIGHTT, 1.06), 120), shadow=True, radius=0.045)
+            _add_rect(slide, 0.9, 2.35, 1.5, 0.06, ACC)
+            _txt(slide, str(slide_data.get("left_title", "") or "Perspective A").upper(), 0.9, 2.5, 5.2, 0.4, size=10, bold=True, color=ACC, font=data_font)
+            _add_bullets_textbox(slide, slide_data.get("left_points", []), 0.9, 3.05, 5.4, 3.6, size=13.5, color=_rgb(INK), marker="→", font=body_font)
+            _round_rect(slide, 6.9, 2.0, 5.9, 4.85, grad=(_shade(CARDT, 1.08), CARDT, 120), shadow=True, radius=0.045)
+            _add_rect(slide, 7.25, 2.35, 1.5, 0.06, ACC)
+            _txt(slide, str(slide_data.get("right_title", "") or "Perspective B").upper(), 7.25, 2.5, 5.2, 0.4, size=10, bold=True, color=ACC, font=data_font)
+            _add_bullets_textbox(slide, slide_data.get("right_points", []), 7.25, 3.05, 5.2, 3.6, size=13.5, color=WHITE, marker="→", font=body_font)
+            light_footer()
 
         elif stype == "stat":
-            _add_rect(slide, 0, 0, 13.33, 7.5, BG)
-            _add_rect(slide, 0, 0, 0.18, 7.5, ACC)
-            _pptx_decor(slide, pal, stype)
-            section_lbl = raw_type.replace("_", " ").upper()[:20] or "KEY METRICS"
-            _txt(slide, f"0{si+1}  \u2022  {section_lbl}", 0.45, 0.12, 12.4, 0.3, size=9, bold=True, color=ACC, font=data_font)
-            _txt(slide, stitle, 0.45, 0.38, 12.4, 1.0, size=30, bold=True, color=WHITE, font=heading_font)
-            _add_rect(slide, 0.45, 1.42, 8, 0.06, ACC)
+            dark_bg()
+            eyebrow(section_lbl or "KEY METRICS")
+            _txt(slide, stitle, 0.58, 0.95, 12.2, 1.1, size=30, bold=True, color=WHITE, font=heading_font)
+            _add_rect(slide, 0.62, 2.05, 0.9, 0.05, ACC)
             stats_data = slide_data.get("stats", [])[:3]
-            card_w, card_h = 3.9, 4.0
-            starts = [0.45, 4.6, 8.75]
+            card_w, gap = 3.92, 0.28
+            starts = [0.6 + i * (card_w + gap) for i in range(3)]
             for ci, st in enumerate(stats_data):
                 cx = starts[ci]
-                card = slide.shapes.add_shape(1, PPTXInches(cx), PPTXInches(1.65), PPTXInches(card_w), PPTXInches(card_h))
-                _solid(card, CARD)
-                _add_rect(slide, cx, 1.65, card_w, 0.2, ACC)
-                num  = str(st.get("number", "—"))
-                lbl  = str(st.get("label", ""))
-                ctx  = str(st.get("context", ""))
-                _txt(slide, num, cx+0.2, 2.05, card_w-0.4, 1.4, size=42, bold=True, color=WHITE, align=PP_ALIGN.CENTER, font=data_font)
-                _txt(slide, lbl, cx+0.2, 3.55, card_w-0.4, 0.6, size=13, bold=True, color=ACC, align=PP_ALIGN.CENTER, font=heading_font)
-                _txt(slide, ctx, cx+0.2, 4.2, card_w-0.4, 1.3, size=11, color=LIGHT, align=PP_ALIGN.CENTER, font=body_font)
-            _add_rect(slide, 0, 7.2, 13.33, 0.3, CARD)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
+                _round_rect(slide, cx, 2.5, card_w, 3.95, grad=(_shade(CARDT, 1.12), CARDT, 120), shadow=True, radius=0.05)
+                _add_rect(slide, cx + 0.35, 2.5, 1.0, 0.07, ACC)
+                _txt(slide, str(st.get("number", "—")), cx + 0.25, 3.15, card_w - 0.5, 1.5, size=46, bold=True, color=WHITE, align=PP_ALIGN.CENTER, font=data_font)
+                _txt(slide, str(st.get("label", "")), cx + 0.25, 4.75, card_w - 0.5, 0.55, size=12.5, bold=True, color=ACC, align=PP_ALIGN.CENTER, font=heading_font)
+                _txt(slide, str(st.get("context", "")), cx + 0.3, 5.3, card_w - 0.6, 1.0, size=10.5, color=LIGHT, align=PP_ALIGN.CENTER, font=body_font)
+            dark_footer()
 
         elif stype == "quote":
-            _add_rect(slide, 0, 0, 13.33, 7.5, BG)
-            _add_rect(slide, 0, 0, 0.18, 7.5, ACC)
-            _txt(slide, "\u201C", 0.4, -0.3, 3, 2.5, size=120, color=CARD, bold=True, font=display_font)
+            _add_grad_rect(slide, 0, 0, 13.33, 7.5, _shade(BGT, 0.62), BGT, 125)
+            _add_rect(slide, 0, 0, 0.16, 7.5, ACC)
+            _txt(slide, "“", 0.45, -0.35, 3, 2.6, size=150, color=_rgb(_shade(CARDT, 1.2)), bold=True, font=display_font)
             quote_txt  = str(slide_data.get("quote", "") or slide_data.get("callout", ""))
             attrib_txt = str(slide_data.get("attribution", ""))
-            qbox = slide.shapes.add_shape(1, PPTXInches(0.8), PPTXInches(1.2), PPTXInches(9.5), PPTXInches(2.8))
-            _solid(qbox, CARD)
-            _txt(slide, quote_txt, 1.1, 1.4, 8.9, 2.5, size=20, color=WHITE, italic=True, font=display_font)
+            _txt(slide, quote_txt, 1.0, 1.75, 8.9, 3.6, size=25, color=WHITE, italic=True, font=display_font)
+            _add_rect(slide, 1.05, 5.5, 0.8, 0.05, ACC)
             if attrib_txt:
-                _txt(slide, attrib_txt, 1.1, 4.2, 9, 0.5, size=13, color=ACC, bold=True, font=body_font)
-            hi = slide_data.get("highlights", []) or slide_data.get("bullets", [])
+                _txt(slide, attrib_txt, 1.05, 5.7, 8.5, 0.5, size=13, color=ACC, bold=True, font=data_font)
+            hi = [h for h in (slide_data.get("highlights", []) or slide_data.get("bullets", [])) if str(h).strip()]
             for hj, h in enumerate(hi[:3]):
-                hy = 1.5 + hj * 1.6
-                hbox = slide.shapes.add_shape(1, PPTXInches(10.6), PPTXInches(hy), PPTXInches(2.4), PPTXInches(1.3))
-                _solid(hbox, CARD)
-                _txt(slide, str(h), 10.7, hy+0.1, 2.2, 1.1, size=11, color=WHITE, font=body_font)
-            _add_rect(slide, 0, 7.2, 13.33, 0.3, CARD)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
+                hy = 1.35 + hj * 1.75
+                _round_rect(slide, 10.35, hy, 2.5, 1.5, grad=(_shade(CARDT, 1.1), CARDT, 120), shadow=True, radius=0.08)
+                _add_rect(slide, 10.55, hy + 0.22, 0.45, 0.05, ACC)
+                _txt(slide, str(h), 10.55, hy + 0.38, 2.1, 1.0, size=10.5, color=WHITE, font=body_font)
+            dark_footer()
 
         elif stype == "chart":
-            _add_rect(slide, 0, 0, 13.33, 7.5, BG)
-            _add_rect(slide, 0, 0, 0.18, 7.5, ACC)
-            section_lbl = raw_type.replace("_", " ").upper()[:20] or "DATA"
-            _txt(slide, f"0{si+1}  •  {section_lbl}", 0.45, 0.12, 12.4, 0.3, size=9, bold=True, color=ACC, font=data_font)
-            _txt(slide, stitle, 0.45, 0.38, 12.4, 1.0, size=30, bold=True, color=WHITE, font=heading_font)
-            _add_rect(slide, 0.45, 1.42, 8, 0.06, ACC)
-            chart_kind = "line" if "trend" in (stitle + raw_type).lower() or "growth" in (stitle + raw_type).lower() else "column"
-            frame = _add_native_pptx_chart(slide, slide_data.get("chart_data"), 0.45, 1.7, 8.4, 5.2, pal, kind=chart_kind)
+            dark_bg()
+            eyebrow(section_lbl or "DATA")
+            _txt(slide, stitle, 0.58, 0.95, 12.2, 1.0, size=29, bold=True, color=WHITE, font=heading_font)
+            _add_rect(slide, 0.62, 2.0, 0.9, 0.05, ACC)
+            _round_rect(slide, 0.55, 2.4, 8.35, 4.35, grad=(_shade(PANEL, 1.5), PANEL, 120), shadow=True, radius=0.04)
+            chart_kind = "line" if ("trend" in (stitle + raw_type).lower() or "growth" in (stitle + raw_type).lower()) else "column"
+            frame = _add_native_pptx_chart(slide, slide_data.get("chart_data"), 0.85, 2.75, 7.75, 3.7, pal, kind=chart_kind)
             if frame is None:
-                # graceful fallback to stat cards if chart data was unusable
                 stats_data = slide_data.get("stats", [])[:3]
                 for ci, st in enumerate(stats_data):
-                    cx = [0.45, 4.6, 8.75][ci]
-                    card = slide.shapes.add_shape(1, PPTXInches(cx), PPTXInches(1.7), PPTXInches(3.9), PPTXInches(4.0))
-                    _solid(card, CARD)
-                    _txt(slide, str(st.get("number", "—")), cx+0.2, 2.05, 3.5, 1.2, size=40, bold=True, color=WHITE, align=PP_ALIGN.CENTER, font=data_font)
-                    _txt(slide, str(st.get("label", "")), cx+0.2, 3.4, 3.5, 0.6, size=12, bold=True, color=ACC, align=PP_ALIGN.CENTER, font=heading_font)
-            # insight rail on the right
-            scard = slide.shapes.add_shape(1, PPTXInches(9.1), PPTXInches(1.7), PPTXInches(3.8), PPTXInches(5.2))
-            _solid(scard, CARD)
-            _add_rect(slide, 9.1, 1.7, 3.8, 0.2, ACC)
-            _txt(slide, "WHAT IT MEANS", 9.25, 1.95, 3.5, 0.4, size=10, bold=True, color=ACC, font=data_font)
-            rail = slide_data.get("highlights") or [st.get("context", "") for st in slide_data.get("stats", [])][:3]
-            _add_bullets_textbox(slide, [r for r in rail if r][:4], 9.25, 2.5, 3.5, 4.2, size=12, color=WHITE, marker="◆", font=body_font)
-            _add_rect(slide, 0, 7.2, 13.33, 0.3, CARD)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
+                    cx = [0.85, 3.55, 6.25][ci]
+                    _txt(slide, str(st.get("number", "—")), cx, 3.4, 2.5, 1.2, size=34, bold=True, color=WHITE, font=data_font)
+                    _txt(slide, str(st.get("label", "")), cx, 4.6, 2.5, 0.6, size=11, bold=True, color=ACC, font=heading_font)
+            _round_rect(slide, 9.15, 2.4, 3.63, 4.35, grad=(_shade(CARDT, 1.1), CARDT, 120), shadow=True, radius=0.05)
+            _add_rect(slide, 9.4, 2.75, 1.0, 0.06, ACC)
+            _txt(slide, "WHAT IT MEANS", 9.4, 2.9, 3.2, 0.4, size=10, bold=True, color=ACC, font=data_font)
+            rail = slide_data.get("highlights") or [st.get("context", "") for st in slide_data.get("stats", [])]
+            _add_bullets_textbox(slide, [r for r in rail if r][:4], 9.4, 3.45, 3.2, 3.1, size=11.5, color=WHITE, marker="◆", font=body_font)
+            dark_footer()
 
         elif stype == "image_text":
-            _add_rect(slide, 0, 0, 13.33, 7.5, _rgb((0xF8, 0xFA, 0xFC)))
-            _add_rect(slide, 0, 0, 13.33, 1.35, PRI)
-            _txt(slide, stitle, 0.45, 0.18, 12.4, 1.0, size=26, bold=True, color=WHITE, font=heading_font)
+            light_bg()
+            eyebrow(section_lbl or "OVERVIEW")
+            _txt(slide, stitle, 0.58, 0.92, 8.6, 1.0, size=27, bold=True, color=_rgb(BGT), font=heading_font)
+            _add_rect(slide, 0.62, 1.95, 0.9, 0.05, ACC)
             body_txt = str(slide_data.get("body", ""))
-            _txt(slide, body_txt, 0.45, 1.6, 8.5, 5.5, size=14, color=_rgb((0x1E, 0x29, 0x3B)), font=body_font)
-            sbox = slide.shapes.add_shape(1, PPTXInches(9.3), PPTXInches(1.55), PPTXInches(3.7), PPTXInches(5.65))
-            _solid(sbox, CARD)
-            _add_rect(slide, 9.3, 1.55, 3.7, 0.2, ACC)
-            _txt(slide, "KEY DATA", 9.4, 1.6, 3.5, 0.5, size=10, bold=True, color=ACC, font=data_font)
-            hi_pts = slide_data.get("highlights", [])[:4]
-            _add_bullets_textbox(slide, hi_pts, 9.4, 2.15, 3.5, 4.9, size=12, color=WHITE, marker="◆", font=body_font)
-            _add_rect(slide, 0, 7.2, 13.33, 0.3, ACC)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
+            _txt(slide, body_txt, 0.6, 2.35, 8.1, 4.4, size=14, color=_rgb(INK), font=body_font)
+            _round_rect(slide, 9.0, 2.0, 3.78, 4.85, grad=(_shade(CARDT, 1.1), CARDT, 120), shadow=True, radius=0.05)
+            _add_rect(slide, 9.3, 2.35, 1.0, 0.06, ACC)
+            _txt(slide, "KEY DATA", 9.3, 2.5, 3.3, 0.4, size=10, bold=True, color=ACC, font=data_font)
+            _add_bullets_textbox(slide, slide_data.get("highlights", [])[:4], 9.3, 3.05, 3.3, 3.6, size=12, color=WHITE, marker="◆", font=body_font)
+            light_footer()
 
         else:
-            _add_rect(slide, 0, 0, 13.33, 7.5, WHITE)
-            _add_rect(slide, 0, 0, 13.33, 1.35, PRI)
-            _txt(slide, stitle, 0.45, 0.18, 12.4, 1.0, size=26, bold=True, color=WHITE, font=heading_font)
+            light_bg()
+            eyebrow(section_lbl or "INSIGHT")
+            _txt(slide, stitle, 0.58, 0.92, 12.2, 1.0, size=27, bold=True, color=_rgb(BGT), font=heading_font)
+            _add_rect(slide, 0.62, 1.95, 0.9, 0.05, ACC)
             stats_fb = slide_data.get("stats", [])[:3]
             if stats_fb:
-                starts = [0.45, 4.6, 8.75]
+                card_w, gap = 3.92, 0.28
+                starts = [0.6 + i * (card_w + gap) for i in range(3)]
                 for ci, st in enumerate(stats_fb):
                     cx = starts[ci]
-                    card = slide.shapes.add_shape(1, PPTXInches(cx), PPTXInches(1.65), PPTXInches(3.9), PPTXInches(4.0))
-                    _solid(card, CARD)
-                    _txt(slide, str(st.get("number", "—")), cx+0.2, 2.0, 3.5, 1.2, size=36, bold=True, color=WHITE, align=PP_ALIGN.CENTER, font=data_font)
-                    _txt(slide, str(st.get("label", "")), cx+0.2, 3.4, 3.5, 0.6, size=12, bold=True, color=ACC, align=PP_ALIGN.CENTER, font=heading_font)
+                    _round_rect(slide, cx, 2.5, card_w, 3.9, grad=(_shade(CARDT, 1.12), CARDT, 120), shadow=True, radius=0.05)
+                    _add_rect(slide, cx + 0.35, 2.5, 1.0, 0.07, ACC)
+                    _txt(slide, str(st.get("number", "—")), cx + 0.25, 3.2, card_w - 0.5, 1.4, size=42, bold=True, color=WHITE, align=PP_ALIGN.CENTER, font=data_font)
+                    _txt(slide, str(st.get("label", "")), cx + 0.25, 4.75, card_w - 0.5, 0.6, size=12, bold=True, color=ACC, align=PP_ALIGN.CENTER, font=heading_font)
             else:
-                bullets = slide_data.get("bullets", [])
-                _add_bullets_textbox(slide, bullets, 0.5, 1.7, 12.3, 5.3, size=14, color=_rgb((0x1E, 0x29, 0x3B)), font=body_font)
-            _add_rect(slide, 0, 7.2, 13.33, 0.3, ACC)
-            _txt(slide, f"{si+1:02d}/{slide_count:02d}  •  {deck_title}", 0.5, 7.22, 12, 0.28, size=9, color=GRAY, font=body_font)
+                _add_bullets_textbox(slide, slide_data.get("bullets", []), 0.6, 2.35, 12.1, 4.4, size=14, color=_rgb(INK), marker="▸", font=body_font)
+            light_footer()
 
         # ── motion: cohesive deck transition + auto-playing staggered entrance ──
         _set_slide_transition(slide, deck_transition)
@@ -2098,7 +2463,7 @@ def _enable_update_fields(doc: Document):
 
 
 def _add_docx_heading_band(doc: Document, text: str, bg_hex: str, fg_hex: str, level_pt: int = 14,
-                            outline_level: int = None):
+                            outline_level: int = None, font: str = None):
     table = doc.add_table(rows=1, cols=1)
     table.style = 'Table Grid'
     cell = table.cell(0, 0)
@@ -2116,15 +2481,12 @@ def _add_docx_heading_band(doc: Document, text: str, bg_hex: str, fg_hex: str, l
         tblBorders.append(border)
     tblPr.append(tblBorders)
     p = cell.paragraphs[0]
-    p.paragraph_format.space_before = Pt(5)
-    p.paragraph_format.space_after  = Pt(5)
-    p.paragraph_format.left_indent  = Inches(0.15)
+    p.paragraph_format.space_before = Pt(7)
+    p.paragraph_format.space_after  = Pt(7)
+    p.paragraph_format.left_indent  = Inches(0.16)
     run = p.add_run(text)
-    run.bold = True
-    run.font.size = Pt(level_pt)
-    run.font.color.rgb = RGBColor(
-        int(fg_hex[1:3],16), int(fg_hex[3:5],16), int(fg_hex[5:7],16)
-    )
+    _docx_run(run, font=font, size=level_pt, bold=True,
+              color=RGBColor(int(fg_hex[1:3],16), int(fg_hex[3:5],16), int(fg_hex[5:7],16)))
     if outline_level is not None:
         _set_outline_level(p, outline_level)
     doc.add_paragraph()
@@ -2192,20 +2554,120 @@ def _add_docx_data_table(doc: Document, table: dict, header_hex: str, accent_hex
     doc.add_paragraph()
 
 
+def _docx_hexrgb(h: str) -> RGBColor:
+    h = h.lstrip('#')
+    return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def _docx_set_base_fonts(doc: Document, body_font: str, body_pt: float = 10.5,
+                          body_color: str = "26303F"):
+    """Set the document's default (Normal) typeface, size, and colour so every
+    paragraph inherits the AI-chosen body font instead of Calibri."""
+    style = doc.styles['Normal']
+    style.font.name = body_font
+    style.font.size = Pt(body_pt)
+    style.font.color.rgb = _docx_hexrgb(body_color)
+    # Ensure the default run properties carry the font for all script ranges.
+    rpr = style.element.get_or_add_rPr()
+    rfonts = rpr.find(qn('w:rFonts'))
+    if rfonts is None:
+        rfonts = OxmlElement('w:rFonts'); rpr.append(rfonts)
+    for attr in ('w:ascii', 'w:hAnsi', 'w:cs'):
+        rfonts.set(qn(attr), body_font)
+    style.paragraph_format.line_spacing = 1.35
+    style.paragraph_format.space_after = Pt(6)
+
+
+def _docx_run(run, font=None, size=None, color=None, bold=None, italic=None,
+              caps=False, spacing=None):
+    if font:
+        run.font.name = font
+        rpr = run._r.get_or_add_rPr()
+        rfonts = rpr.find(qn('w:rFonts'))
+        if rfonts is None:
+            rfonts = OxmlElement('w:rFonts'); rpr.append(rfonts)
+        for attr in ('w:ascii', 'w:hAnsi', 'w:cs'):
+            rfonts.set(qn(attr), font)
+    if size is not None:
+        run.font.size = Pt(size)
+    if color is not None:
+        run.font.color.rgb = _docx_hexrgb(color) if isinstance(color, str) else color
+    if bold is not None:
+        run.font.bold = bold
+    if italic is not None:
+        run.font.italic = italic
+    if caps:
+        run.font.all_caps = True
+    if spacing is not None:  # letter-spacing in twips
+        rpr = run._r.get_or_add_rPr()
+        sp = OxmlElement('w:spacing'); sp.set(qn('w:val'), str(spacing)); rpr.append(sp)
+    return run
+
+
+def _docx_accent_bar(doc: Document, hex_color: str, width_dxa: int = 1300, height_pt: float = 3.2,
+                     space_before: int = 6, space_after: int = 6):
+    """A short, left-aligned solid accent rule (a borderless 1-cell shaded table)."""
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.cell(0, 0)
+    _set_cell_bg(cell, hex_color.lstrip('#'))
+    tbl = table._tbl
+    tblPr = tbl.find(qn('w:tblPr'))
+    if tblPr is None:
+        tblPr = OxmlElement('w:tblPr'); tbl.insert(0, tblPr)
+    borders = OxmlElement('w:tblBorders')
+    for side in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
+        b = OxmlElement(f'w:{side}'); b.set(qn('w:val'), 'none'); borders.append(b)
+    tblPr.append(borders)
+    w = tblPr.find(qn('w:tblW'))
+    if w is not None:
+        tblPr.remove(w)
+    tblW = OxmlElement('w:tblW'); tblW.set(qn('w:w'), str(width_dxa)); tblW.set(qn('w:type'), 'dxa')
+    tblPr.append(tblW)
+    p = cell.paragraphs[0]
+    p.paragraph_format.space_before = Pt(space_before)
+    p.paragraph_format.space_after = Pt(space_after)
+    r = p.add_run(); r.font.size = Pt(height_pt)
+    return table
+
+
+def _docx_page_footer(doc: Document, left_text: str, accent_hex: str, gray_hex: str, data_font: str):
+    """Running footer: document title on the left, live page number on the right."""
+    section = doc.sections[0]
+    footer = section.footer
+    footer.is_linked_to_previous = False
+    p = footer.paragraphs[0]
+    p.text = ""
+    # right tab at the content width so the page number sits flush-right
+    pPr = p._p.get_or_add_pPr()
+    tabs = OxmlElement('w:tabs')
+    tab = OxmlElement('w:tab'); tab.set(qn('w:val'), 'right')
+    content_w = int((section.page_width - section.left_margin - section.right_margin) / 635)  # EMU→twips
+    tab.set(qn('w:pos'), str(content_w)); tabs.append(tab); pPr.append(tabs)
+    lr = p.add_run(left_text.upper()); _docx_run(lr, font=data_font, size=7.5, color=gray_hex, spacing=20)
+    p.add_run("\t")
+    pr = p.add_run("PAGE "); _docx_run(pr, font=data_font, size=7.5, color=accent_hex.lstrip('#'))
+    fld = p.add_run()
+    begin = OxmlElement('w:fldChar'); begin.set(qn('w:fldCharType'), 'begin')
+    instr = OxmlElement('w:instrText'); instr.set(qn('xml:space'), 'preserve'); instr.text = 'PAGE'
+    end = OxmlElement('w:fldChar'); end.set(qn('w:fldCharType'), 'end')
+    fld._r.append(begin); fld._r.append(instr); fld._r.append(end)
+    _docx_run(fld, font=data_font, size=7.5, color=accent_hex.lstrip('#'), bold=True)
+
+
 @app.post("/docs/generate/docx")
 async def generate_docx(payload: dict):
     structure = await call_ai_docx(_normalize_topic_prompt(payload["prompt"]))
 
     pname = str(structure.get("palette", "indigo")).lower()
     pal = PALETTES.get(pname, PALETTES["indigo"])
-    if structure.get("design_system"):
-        tokens = _resolve_design_tokens(structure)
-        PRI_HEX = tokens["primary"]
-        ACC_HEX = tokens["accent"]
-        pal = {**pal, "light": tokens["light"]}
-    else:
-        PRI_HEX = pal["primary"]
-        ACC_HEX = pal["accent"]
+    tokens = _resolve_design_tokens(structure)
+    PRI_HEX = tokens["primary"]
+    ACC_HEX = tokens["accent"]
+    pal = {**pal, "light": tokens["light"]}
+    H1_FONT = tokens["h1_font"]
+    H2_FONT = tokens["h2_font"]
+    BODY_FONT = tokens["body_font"]
+    DATA_FONT = tokens["data_font"]
 
     def hexrgb(h):
         h = h.lstrip('#')
@@ -2214,98 +2676,84 @@ async def generate_docx(payload: dict):
     PRI_RGB  = hexrgb(PRI_HEX)
     ACC_RGB  = hexrgb(ACC_HEX)
     GRAY_RGB = RGBColor(0x6B,0x72,0x80)
-    BODY_RGB = RGBColor(0x1F,0x2A,0x3C)
+    BODY_RGB = RGBColor(0x26,0x30,0x3F)
 
     doc = Document()
+    _docx_set_base_fonts(doc, BODY_FONT, body_pt=10.5)
 
     for sec in doc.sections:
-        sec.top_margin    = Inches(1.1)
+        sec.top_margin    = Inches(1.15)
         sec.bottom_margin = Inches(1.0)
-        sec.left_margin   = Inches(1.2)
-        sec.right_margin  = Inches(1.2)
+        sec.left_margin   = Inches(1.15)
+        sec.right_margin  = Inches(1.15)
+
+    # ── editorial cover ──────────────────────────────────────────────────────
+    aesthetic = structure.get("aesthetic_direction") or {}
+    eyebrow_txt = str(aesthetic.get("label") or aesthetic.get("name") or "Report").upper()
+    spacer = doc.add_paragraph(); spacer.paragraph_format.space_before = Pt(90)
+
+    eyebrow_para = doc.add_paragraph()
+    eyebrow_para.paragraph_format.space_after = Pt(10)
+    _docx_run(eyebrow_para.add_run(eyebrow_txt), font=DATA_FONT, size=10.5, color=ACC_HEX.lstrip('#'),
+              bold=True, spacing=48)
 
     title_para = doc.add_paragraph()
-    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_para.paragraph_format.space_before = Pt(40)
-    title_para.paragraph_format.space_after  = Pt(10)
-    tr = title_para.add_run(structure.get("title","Document"))
-    tr.bold = True
-    tr.font.size = Pt(32)
-    tr.font.color.rgb = PRI_RGB
+    title_para.paragraph_format.space_after = Pt(12)
+    title_para.paragraph_format.line_spacing = 1.0
+    _docx_run(title_para.add_run(structure.get("title", "Document")), font=H1_FONT, size=38,
+              color=PRI_HEX.lstrip('#'), bold=True)
 
     if structure.get("subtitle"):
         sp = doc.add_paragraph()
-        sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        sp.paragraph_format.space_after = Pt(6)
-        sr = sp.add_run(structure["subtitle"])
-        sr.italic = True
-        sr.font.size = Pt(15)
-        sr.font.color.rgb = ACC_RGB
+        sp.paragraph_format.space_after = Pt(18)
+        _docx_run(sp.add_run(structure["subtitle"]), font=H2_FONT, size=15,
+                  color="55606E", italic=False)
 
-    sep_table = doc.add_table(rows=1, cols=1)
-    sep_table.style = 'Table Grid'
-    sep_cell = sep_table.cell(0,0)
-    _set_cell_bg(sep_cell, ACC_HEX.lstrip('#'))
-    sep_tbl = sep_table._tbl
-    sep_tblPr = sep_tbl.find(qn('w:tblPr'))
-    if sep_tblPr is None:
-        sep_tblPr = OxmlElement('w:tblPr')
-        sep_tbl.insert(0, sep_tblPr)  # tblPr must be the first child of w:tbl
-    existing_w = sep_tblPr.find(qn('w:tblW'))
-    if existing_w is not None:
-        sep_tblPr.remove(existing_w)
-    tblW = OxmlElement('w:tblW')
-    tblW.set(qn('w:w'), '3000')
-    tblW.set(qn('w:type'), 'dxa')
-    sep_tblPr.append(tblW)
-    sep_cell.paragraphs[0].paragraph_format.space_before = Pt(1)
-    sep_cell.paragraphs[0].paragraph_format.space_after  = Pt(1)
-
-    doc.add_paragraph()
+    _docx_accent_bar(doc, ACC_HEX, width_dxa=1500, height_pt=3.4, space_before=2, space_after=16)
 
     meta_para = doc.add_paragraph()
-    meta_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    meta_para.paragraph_format.space_after = Pt(4)
-    mr = meta_para.add_run(structure.get("author",""))
-    mr.font.size = Pt(11)
-    mr.font.color.rgb = GRAY_RGB
-
-    date_para = doc.add_paragraph()
-    date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    dr = date_para.add_run(structure.get("date",""))
-    dr.font.size = Pt(11)
-    dr.font.color.rgb = GRAY_RGB
+    meta_para.paragraph_format.space_after = Pt(3)
+    author_txt = str(structure.get("author", "")).strip()
+    date_txt = str(structure.get("date", "")).strip()
+    meta_line = "  ·  ".join([t for t in (author_txt, date_txt) if t])
+    _docx_run(meta_para.add_run(meta_line), font=DATA_FONT, size=9.5, color="6B7280", spacing=20)
 
     doc.add_page_break()
 
     # Clickable, auto-updating table of contents (driven by paragraph outline levels).
     if structure.get("sections"):
-        _add_docx_heading_band(doc, "Contents", PRI_HEX, "#FFFFFF", level_pt=14)
+        _add_docx_heading_band(doc, "Contents", PRI_HEX, "#FFFFFF", level_pt=13, font=H2_FONT)
         _add_docx_toc(doc)
         doc.add_page_break()
 
     if structure.get("abstract"):
-        _add_docx_heading_band(doc, "Executive Summary", PRI_HEX, "#FFFFFF", level_pt=14, outline_level=0)
+        _add_docx_heading_band(doc, "Executive Summary", PRI_HEX, "#FFFFFF", level_pt=13,
+                               outline_level=0, font=H2_FONT)
         abs_para = doc.add_paragraph(structure["abstract"])
-        abs_para.paragraph_format.space_after = Pt(10)
-        abs_para.paragraph_format.left_indent = Inches(0.1)
+        abs_para.paragraph_format.space_after = Pt(12)
+        abs_para.paragraph_format.left_indent = Inches(0.28)
+        abs_para.paragraph_format.line_spacing = 1.4
+        # left accent rule on the lede
+        pBdr = OxmlElement('w:pBdr'); left_b = OxmlElement('w:left')
+        left_b.set(qn('w:val'), 'single'); left_b.set(qn('w:sz'), '18')
+        left_b.set(qn('w:space'), '14'); left_b.set(qn('w:color'), ACC_HEX.lstrip('#'))
+        pBdr.append(left_b); abs_para._p.get_or_add_pPr().append(pBdr)
         for run in abs_para.runs:
-            run.font.size = Pt(11.5)
-            run.font.color.rgb = BODY_RGB
-            run.italic = True
+            _docx_run(run, font=H2_FONT, size=12.5, color="3A4453")
         doc.add_paragraph()
 
     for si, sec in enumerate(structure.get("sections", [])):
         is_alt = (si % 2 == 1)
         h_bg  = ACC_HEX if is_alt else PRI_HEX
-        section_label = f"{si+1:02d}  \u2014  {sec['heading']}"
-        _add_docx_heading_band(doc, section_label, h_bg, "#FFFFFF", level_pt=14, outline_level=0)
+        section_label = f"{si+1:02d}   {sec['heading']}"
+        _add_docx_heading_band(doc, section_label, h_bg, "#FFFFFF", level_pt=14,
+                               outline_level=0, font=H2_FONT)
 
         body_para = doc.add_paragraph(sec.get("body",""))
-        body_para.paragraph_format.space_after  = Pt(10)
-        body_para.paragraph_format.space_before = Pt(2)
-        body_para.paragraph_format.left_indent  = Inches(0.1)
-        body_para.paragraph_format.line_spacing = Pt(16)
+        body_para.paragraph_format.space_after  = Pt(11)
+        body_para.paragraph_format.space_before = Pt(3)
+        body_para.paragraph_format.line_spacing = 1.4
+        body_para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         for run in body_para.runs:
             run.font.size = Pt(11)
             run.font.color.rgb = BODY_RGB
@@ -2319,14 +2767,10 @@ async def generate_docx(payload: dict):
 
         for sub_idx, sub in enumerate(sec.get("subsections", [])):
             sub_para = doc.add_paragraph()
-            sub_para.paragraph_format.space_before = Pt(10)
+            sub_para.paragraph_format.space_before = Pt(11)
             sub_para.paragraph_format.space_after  = Pt(4)
-            sub_para.paragraph_format.left_indent  = Inches(0.1)
-            sub_label = f"{si+1}.{sub_idx+1}  {sub['heading']}"
-            sub_run = sub_para.add_run(sub_label)
-            sub_run.bold = True
-            sub_run.font.size = Pt(12.5)
-            sub_run.font.color.rgb = ACC_RGB
+            sub_label = f"{si+1}.{sub_idx+1}   {sub['heading']}"
+            _docx_run(sub_para.add_run(sub_label), font=H2_FONT, size=13, bold=True, color=ACC_HEX.lstrip('#'))
             _set_outline_level(sub_para, 1)
 
             sub_body = doc.add_paragraph(sub.get("body",""))
@@ -2352,15 +2796,15 @@ async def generate_docx(payload: dict):
         pPr_sep.append(pBdr_sep)
 
     if structure.get("conclusion"):
-        _add_docx_heading_band(doc, "Conclusion", PRI_HEX, "#FFFFFF", level_pt=14, outline_level=0)
+        _add_docx_heading_band(doc, "Conclusion", PRI_HEX, "#FFFFFF", level_pt=13,
+                               outline_level=0, font=H2_FONT)
         conc_para = doc.add_paragraph(structure["conclusion"])
         conc_para.paragraph_format.space_after = Pt(10)
-        conc_para.paragraph_format.left_indent = Inches(0.1)
+        conc_para.paragraph_format.line_spacing = 1.4
         for run in conc_para.runs:
-            run.font.size = Pt(11)
-            run.font.color.rgb = BODY_RGB
-            run.italic = True
+            _docx_run(run, font=H2_FONT, size=11.5, color="3A4453")
 
+    _docx_page_footer(doc, structure.get("title", "Document"), ACC_HEX, "9AA2AD", DATA_FONT)
     _enable_update_fields(doc)
 
     buffer = io.BytesIO()
