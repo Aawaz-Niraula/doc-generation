@@ -1,0 +1,166 @@
+{
+  "title": "The State of Grid-Scale Energy Storage",
+  "subtitle": "How falling battery costs are rewiring the economics of renewable power",
+  "author": "Prepared for the 2026 Energy Transition Briefing",
+  "date": "2026",
+  "topic_prompt": "grid-scale energy storage, renewable energy economics",
+  "abstract": "Global grid-scale battery deployments reached 92 GW of cumulative capacity in 2025, a 41% year-on-year jump, while average pack prices fell below $95/kWh for the first time. This briefing maps where that capacity landed, what it did to wholesale power markets, and which storage technologies will define the next build-out cycle.",
+  "conclusion": "Storage is no longer the bottleneck of the energy transition — financing and interconnection queues are. The developers who win the next five years will be the ones who treat batteries as market instruments, not infrastructure.",
+  "aesthetic_direction": {
+    "name": "bauhaus_data",
+    "label": "Bauhaus Data",
+    "rationale": "Energy infrastructure is geometric and systemic; a Bauhaus-inspired grid with bold primaries-turned-industrial suits the subject's engineering confidence."
+  },
+  "design_system": {
+    "colors": {
+      "dominant": "#0C4A5E",
+      "secondary": "#136178",
+      "supporting_1": "#59B8CE",
+      "supporting_2": "#EAF4F6",
+      "accent": "#F4B942"
+    },
+    "typography": {
+      "h1_font": "Space Grotesk",
+      "h2_font": "DM Sans",
+      "body_font": "Source Sans 3",
+      "data_font": "JetBrains Mono"
+    },
+    "layout_philosophy": "Rotate hero-data, split-narrative, and card-grid pages so no two consecutive spreads share a skeleton.",
+    "signature_element": "Numbered amber circles marking every data block"
+  },
+  "sections": [
+    {
+      "type": "cover",
+      "eyebrow": "2026 BRIEFING",
+      "heading": "The State of Grid-Scale Energy Storage",
+      "subtitle": "How falling battery costs are rewiring the economics of renewable power",
+      "tagline": "Bauhaus Data | 92 GW installed. $95/kWh. The grid will never be the same.",
+      "callout": "Storage stopped being a technology bet in 2025. It became a market position.",
+      "speaker_notes": "Open with the headline: storage crossed from pilot economics to portfolio economics in a single year. This deck shows where, why, and what happens next."
+    },
+    {
+      "type": "context",
+      "eyebrow": "WHY NOW",
+      "heading": "Three numbers that changed the market",
+      "body": "The 2025 build-out was not incremental — it doubled the pace of every prior year. Cumulative grid-scale capacity hit 92 GW globally, with China and the United States accounting for 71% of additions. Average lithium-iron-phosphate pack prices broke the $95/kWh floor analysts once called impossible before 2030, and four-hour systems began clearing capacity auctions against gas peakers outright.",
+      "stats": [
+        { "value": "92 GW", "label": "CUMULATIVE CAPACITY", "context": "Global grid-scale storage installed by end of 2025, up 41% year on year." },
+        { "value": "$94/kWh", "label": "LFP PACK PRICE", "context": "Average Q4 2025 price — a 19% drop in twelve months." },
+        { "value": "71%", "label": "US + CHINA SHARE", "context": "Two markets dominate additions; Europe trails on interconnection delays." }
+      ],
+      "speaker_notes": "Anchor the audience in three numbers: 92 gigawatts installed, sub-95-dollar packs, and a two-country race. Everything later builds on these."
+    },
+    {
+      "type": "deep_dive_1",
+      "eyebrow": "ECONOMICS",
+      "heading": "Batteries vs. gas peakers",
+      "body": "Levelized cost comparisons flipped in 2025 for the first time in mid-merit applications. A four-hour battery now delivers firm evening capacity at $118/MWh against $142/MWh for a new-build gas peaker in ERCOT-like markets, before any tax credit. The gap widens to 34% with investment credits applied.",
+      "left_title": "Four-hour battery",
+      "left_points": [
+        "Firm evening capacity at $118/MWh levelized in high-solar markets, falling roughly 8% per year",
+        "Captures arbitrage plus ancillary revenue stacks worth $28-45/kW-year on top of capacity payments",
+        "Deploys in 14-20 months from notice to commercial operation"
+      ],
+      "right_title": "New-build gas peaker",
+      "right_points": [
+        "Firm capacity at $142/MWh levelized and rising with turbine backlogs stretching to 2029",
+        "Single revenue stream exposed to fuel basis risk and tightening emissions rules",
+        "Development timelines of 3-5 years including air permits and gas interconnection"
+      ],
+      "chart_data": [["2021", 189], ["2022", 164], ["2023", 148], ["2024", 131], ["2025", 118]],
+      "speaker_notes": "Walk the cost crossover: batteries beat new peakers on levelized cost in 2025. Note the turbine supply backlog pushing gas timelines out to 2029."
+    },
+    {
+      "type": "deep_dive_2",
+      "eyebrow": "ON THE GROUND",
+      "heading": "What a 1 GWh site actually looks like",
+      "body": "The Edwards & Sanborn complex in Kern County set the template: 4,600 containerized packs across 4.5 square kilometres, co-located with 875 MW of solar and a single 500 kV interconnection. Co-location cut interconnection cost per megawatt by 38% versus standalone siting, and shared inverters lifted round-trip efficiency to 87%. The industry copied it — 62% of 2025 US additions were solar-paired.",
+      "highlights": [
+        "Co-location cuts interconnection cost per MW by 38%",
+        "Shared inverters lift round-trip efficiency to 87%",
+        "62% of 2025 US additions were solar-paired hybrids"
+      ],
+      "image_keyword": "aerial view of large solar farm with battery storage containers in desert",
+      "speaker_notes": "Use the Edwards and Sanborn example to make the scale physical: 4,600 containers, one interconnection point. Co-location is now the default architecture."
+    },
+    {
+      "type": "deep_dive_3",
+      "eyebrow": "MARKET IMPACT",
+      "heading": "The duck curve is being paid to flatten",
+      "body": "California's evening ramp — once the poster child of renewable intermittency — shrank 31% in 2025 as 11.2 GW of state storage shifted solar into the peak. Evening price spikes above $200/MWh fell from 118 hours in 2022 to 22 hours in 2025, and storage captured an average spread of $61/MWh doing it.",
+      "stats": [
+        { "value": "11.2 GW", "label": "CAISO STORAGE FLEET", "context": "Installed capacity participating in California markets by December 2025." },
+        { "value": "-31%", "label": "EVENING RAMP", "context": "Reduction in the net-load ramp versus the 2022 baseline." },
+        { "value": "$61/MWh", "label": "CAPTURED SPREAD", "context": "Average charge-discharge arbitrage realized by CAISO batteries in 2025." }
+      ],
+      "chart_data": [["2022", 118], ["2023", 74], ["2024", 41], ["2025", 22]],
+      "hero_stat": { "value": "22 hrs", "label": "PRICE SPIKES LEFT", "context": "Hours above $200/MWh in CAISO in 2025, down from 118 in 2022." },
+      "speaker_notes": "This is the proof slide: storage is visibly reshaping price formation. The spike-hours chart is the single most persuasive series in the deck."
+    },
+    {
+      "type": "comparative",
+      "eyebrow": "TIMELINE",
+      "heading": "Four eras of storage economics",
+      "body": "Each era compressed faster than the last. What took pumped hydro four decades took lithium-ion cell economics one.",
+      "steps": [
+        { "step": "Pilot era", "desc": "Utility demonstrations under 10 MW prove round-trip viability; costs above $600/kWh.", "date": "2012-2016" },
+        { "step": "Ancillary era", "desc": "Frequency-regulation markets in PJM and UK fund the first merchant fleets.", "date": "2017-2020" },
+        { "step": "Capacity era", "desc": "Four-hour systems win capacity auctions; solar-paired hybrids become the default.", "date": "2021-2024" },
+        { "step": "Merchant era", "desc": "Sub-$95/kWh packs make pure arbitrage bankable without subsidy in high-spread markets.", "date": "2025 →" }
+      ],
+      "speaker_notes": "Compress twelve years into four eras. The point: each business model funded the cost curve that enabled the next one."
+    },
+    {
+      "type": "case_study",
+      "eyebrow": "FIELD REPORT",
+      "heading": "The trader's view",
+      "callout": "We stopped modelling batteries as assets with a depreciation schedule and started modelling them as options on volatility. That single change re-priced our entire pipeline.",
+      "attribution": "— Head of Power Trading, European utility, January 2026",
+      "highlights": [
+        "Volatility-based valuation lifted project NPVs 22% on average",
+        "Two-hour systems repriced below four-hour for the first time",
+        "Toll agreements now cover 58% of new European capacity"
+      ],
+      "speaker_notes": "Let the quote breathe — it captures the mental shift from infrastructure to instrument. The three side cards quantify what that reframing did."
+    },
+    {
+      "type": "future",
+      "eyebrow": "NEXT CYCLE",
+      "heading": "What breaks the pattern",
+      "body": "Three forces could bend the curve again before 2030: sodium-ion cells entering mass production at a projected $56/kWh, iron-air pilots proving 100-hour duration at utility scale, and interconnection reform unlocking the 2.6 TW of storage-hybrid projects stuck in US queues.",
+      "statements": [
+        "Sodium-ion moves the floor: $56/kWh cells make storage a commodity, not a supply chain race.",
+        "100-hour iron-air turns storage from a peaker replacement into a transmission replacement.",
+        "The queue is the new OPEC: 2.6 TW of projects wait on paperwork, not physics."
+      ],
+      "speaker_notes": "Close the analysis section by naming the three discontinuities to watch: sodium-ion pricing, long-duration chemistry, and interconnection reform."
+    },
+    {
+      "type": "takeaways",
+      "eyebrow": "SYNTHESIS",
+      "heading": "Four moves for the next 24 months",
+      "body": "The window where storage knowledge is a competitive edge is closing. These four positions matter most before 2028.",
+      "tiles": [
+        { "label": "SITE", "value": "Lock interconnection positions now — queue time, not capex, is the scarcest asset in the market." },
+        { "label": "STACK", "value": "Underwrite on revenue stacks, not single streams; arbitrage-only models leave 30% of value uncaptured." },
+        { "label": "SIZE", "value": "Follow the spread: two-hour systems now clear better risk-adjusted returns in half of US markets." },
+        { "label": "SCAN", "value": "Track sodium-ion factory commissioning as the leading indicator of the next price break." }
+      ],
+      "speaker_notes": "End the body with actions, not observations: site control, revenue stacking, right-sizing duration, and watching the sodium-ion supply chain."
+    },
+    {
+      "type": "closing",
+      "eyebrow": "CLOSE",
+      "heading": "The grid is becoming a market with a memory",
+      "body": "Every gigawatt of storage added makes electricity prices smoother, evening capacity cheaper, and the next gigawatt easier to finance. That feedback loop — not any single technology — is the story of this decade.",
+      "cta": "Take one project through volatility-based valuation this quarter.",
+      "tagline": "Bauhaus Data | The 2026 Energy Transition Briefing",
+      "takeaways": [
+        "Storage now sets evening prices in the two largest power markets",
+        "Cost curves keep compounding: every era funded the next one",
+        "The constraint has moved from chemistry to queues"
+      ],
+      "speaker_notes": "Land the flywheel argument: storage deployment improves storage economics. Leave the room with the single CTA — run one live project through the new valuation lens."
+    }
+  ]
+}
