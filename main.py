@@ -150,11 +150,11 @@ async def upload_to_vercel_blob(data: bytes, filename: str, content_type: str) -
     from vercel.blob import AsyncBlobClient
 
     pathname = f"generated/{uuid.uuid4().hex[:8]}-{filename}"
-    async with AsyncBlobClient(token=VERCEL_BLOB_TOKEN) as client:
-        blob = await client.put(
-            pathname, data, access="public",
-            content_type=content_type, add_random_suffix=False, overwrite=False,
-        )
+    client = AsyncBlobClient(token=VERCEL_BLOB_TOKEN)
+    blob = await client.put(
+        pathname, data, access="public",
+        content_type=content_type, add_random_suffix=False, overwrite=False,
+    )
     url = _blob_value(blob, "url")
     if not url:
         raise HTTPException(status_code=502, detail="Vercel Blob upload returned no URL")
