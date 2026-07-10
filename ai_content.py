@@ -79,7 +79,9 @@ async def _deepinfra_call(messages: list, temperature: float = 0.4) -> str:
     if not DEEPINFRA_KEY:
         raise AIContentError("DEEPINFRA_KEY is not configured on the document service", status=500)
 
-    async with httpx.AsyncClient(timeout=300) as client:
+    # Must finish well inside the 270s service deadline (main.py) so images,
+    # rendering, QA and blob upload still fit in the caller's 5-minute budget.
+    async with httpx.AsyncClient(timeout=httpx.Timeout(210, connect=10)) as client:
         res = await client.post(
             "https://api.deepinfra.com/v1/openai/chat/completions",
             headers={"Authorization": f"Bearer {DEEPINFRA_KEY}"},

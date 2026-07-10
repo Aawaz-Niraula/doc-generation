@@ -49,6 +49,10 @@ CONTENT_TYPES = {
 
 _COUNT_UNITS = {"pdf": "page", "pptx": "slide", "docx": "section"}
 
+# Hard deadline for HTTP requests: callers (BotBot) abort at ~290s, so the
+# service must answer — success or a clear error — before that.
+GENERATION_BUDGET_SECONDS = 270
+
 
 # ─── Error handling ───────────────────────────────────────────────────────────
 
@@ -222,6 +226,18 @@ async def generate(prompt: str, cfg: GenerationConfig) -> List[GenerationResult]
     return list(await asyncio.gather(*tasks))
 
 
+async def _generate_with_deadline(coro):
+    """Bound an HTTP-triggered generation so the service always responds
+    before the caller's timeout instead of being cut off by the gateway."""
+    try:
+        return await asyncio.wait_for(coro, timeout=GENERATION_BUDGET_SECONDS)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(f"Document generation exceeded the {GENERATION_BUDGET_SECONDS}s budget. "
+                    "Try fewer sections or a simpler prompt."))
+
+
 # ─── HTTP endpoints (backward-compatible) ─────────────────────────────────────
 
 @app.post("/docs/generate")
@@ -235,7 +251,7 @@ async def generate_document(payload: dict):
         if fmt == "both":
             cfg = GenerationConfig.from_payload(payload, "pdf")
             cfg.formats = ["pdf", "pptx"]
-            results = await generate(prompt, cfg)
+            results = await _generate_with_deadline(generate(prompt, cfg))
             return {r.format: r.as_response() for r in results}
         if fmt in ("pptx", "presentation", "slides"):
             return await generate_pptx(payload)
@@ -251,7 +267,7 @@ async def generate_pdf(payload: dict):
     try:
         prompt = normalize_topic_prompt(str(payload["prompt"]))
         cfg = GenerationConfig.from_payload(payload, "pdf")
-        result = await _generate_format(prompt, "pdf", cfg)
+        result = await _generate_with_deadline(_generate_format(prompt, "pdf", cfg))
         return result.as_response()
     except Exception as exc:
         _http_error(exc)
@@ -262,7 +278,7 @@ async def generate_pptx(payload: dict):
     try:
         prompt = normalize_topic_prompt(str(payload["prompt"]))
         cfg = GenerationConfig.from_payload(payload, "pptx")
-        result = await _generate_format(prompt, "pptx", cfg)
+        result = await _generate_with_deadline(_generate_format(prompt, "pptx", cfg))
         return result.as_response()
     except Exception as exc:
         _http_error(exc)
@@ -273,7 +289,7 @@ async def generate_docx(payload: dict):
     try:
         prompt = normalize_topic_prompt(str(payload["prompt"]))
         cfg = GenerationConfig.from_payload(payload, "docx")
-        result = await _generate_format(prompt, "docx", cfg)
+        result = await _generate_with_deadline(_generate_format(prompt, "docx", cfg))
         return result.as_response()
     except Exception as exc:
         _http_error(exc)
