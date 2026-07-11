@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-07-11 (fifth pass) — Embedded video clips (Pexels)
+
+- When `PEXELS_API_KEY` is set, up to 2 interior sections per deck get a short
+  cinematic clip from the Pexels video API (landscape H.264 mp4, ≤30s,
+  960–1920px, ≤12MB) embedded as a REAL movie via `shapes.add_movie`, poster
+  frame = the section's photo. Keynote imports and plays H.264 natively.
+- The split layout gained a media-hero branch: true 16:9 video panel (movies
+  stretch to their frame — no cover-crop like photos), body + numbered insight
+  rows beside it, caption chip beneath, soft shadow. Photo fills the slot if
+  embedding ever fails; every fallback path is preserved.
+- Budgeted hard: video is a bonus layer — a deck must stay a deck, not become
+  a download problem. PDF/DOCX ignore `video_data` entirely.
+
 ## 2026-07-11 (fourth pass) — True per-generation design randomness
 
 **Why:** audit of "is every generation actually different?" found two

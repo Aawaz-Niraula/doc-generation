@@ -156,6 +156,7 @@ class Section:
     cta: str = ""                      # closing call to action
     image_keyword: str = ""
     image_data: str = ""               # data: URI, filled by assets.prefetch_images
+    video_data: str = ""               # data: URI (mp4), filled by assets.prefetch_images
     speaker_notes: str = ""
     subsections: List[Subsection] = field(default_factory=list)
     # Layout assignment (set per run by the renderers' layout planners)

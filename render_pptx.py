@@ -874,11 +874,16 @@ def _build_quote(d: _Deck, slide, sec: Section, idx: int):
 
 def _build_image_text(d: _Deck, slide, sec: Section, idx: int):
     dark = d.content_bg(slide)
-    # Editorial split: full-height photo bleeding off the right edge — the
-    # magazine layout that makes a slide read as designed rather than filled.
+    # Media hierarchy: embedded video (16:9 panel, poster = section photo) >
+    # editorial full-height photo split > geometric data panel.
+    video = assets.video_bytes(sec)
+    vid_x, vid_y, vid_w = 6.6, 2.3, SLIDE_W - 6.6 - MARGIN
+    vid_h = vid_w * 9.0 / 16.0
     split_x = 8.15
-    has_photo = _photo(slide, sec, split_x, 0, SLIDE_W - split_x, SLIDE_H, shadow=False)
-    text_right = split_x - 0.45 if has_photo else 8.5
+    has_photo = False
+    if not video:
+        has_photo = _photo(slide, sec, split_x, 0, SLIDE_W - split_x, SLIDE_H, shadow=False)
+    text_right = (vid_x - 0.4) if video else (split_x - 0.45 if has_photo else 8.5)
     d.eyebrow(slide, idx, sec.eyebrow or "OVERVIEW", dark)
     d.slide_title(slide, sec.heading, dark, width=text_right - MARGIN)
     body_color = "#FFFFFF" if dark else d.BODY
@@ -888,7 +893,7 @@ def _build_image_text(d: _Deck, slide, sec: Section, idx: int):
     chip_text = sec.callout or (sec.fallback_highlights() or [""])[0]
     rows = [r for r in _rail_content(sec, 4)
             if r not in (sec.body or "") and r.strip() != str(chip_text).strip()][:3] \
-        if has_photo else []    # no-photo branch shows these in its side panel
+        if (has_photo or video) else []   # no-media branch shows these in its side panel
     body_h = 2.35 if rows else 4.4
     _txt(slide, sec.body, MARGIN, 2.3, text_w, body_h, size=d.S.body,
          color=body_color, font=d.F["body"], min_size=11)
@@ -901,7 +906,36 @@ def _build_image_text(d: _Deck, slide, sec: Section, idx: int):
             _txt(slide, str(r), MARGIN + 0.5, ry + 0.015, text_w - 0.5, 0.56,
                  size=11.5, color=row_txt, font=d.F["body"], min_size=9,
                  anchor=MSO_ANCHOR.MIDDLE)
-    if has_photo:
+    if video:
+        placed = False
+        try:
+            poster = assets.image_bytes(sec)
+            movie = slide.shapes.add_movie(
+                io.BytesIO(video), Inches(vid_x), Inches(vid_y),
+                Inches(vid_w), Inches(vid_h),
+                poster_frame_image=io.BytesIO(poster) if poster else None,
+                mime_type="video/mp4")
+            _soft_shadow(movie)
+            placed = True
+        except Exception:
+            # video part failed to embed — the section photo fills the slot
+            placed = _photo(slide, sec, vid_x, vid_y, vid_w, vid_h)
+        if placed and str(chip_text).strip():
+            chip = _round_card(slide, vid_x, vid_y + vid_h + 0.25, vid_w, 0.9,
+                               color=_shade(d.DOM, 0.85), radius=0.12, shadow=True)
+            ctf = chip.text_frame
+            ctf.word_wrap = True
+            try:
+                ctf.vertical_anchor = MSO_ANCHOR.MIDDLE
+            except Exception:
+                pass
+            ctf.paragraphs[0].text = clip_words(str(chip_text), 16)
+            r0 = ctf.paragraphs[0].runs[0]
+            r0.font.size = Pt(10.5)
+            r0.font.color.rgb = _rgb("#FFFFFF")
+            r0.font.name = d.F["body"]
+        d.footer(slide, idx, dark)
+    elif has_photo:
         if str(chip_text).strip():
             chip = _round_card(slide, split_x + 0.35, SLIDE_H - 1.5, SLIDE_W - split_x - 0.9,
                                1.0, color=_shade(d.DOM, 0.85), radius=0.12, shadow=True)

@@ -244,6 +244,62 @@ async def _fetch_single_image(client: httpx.AsyncClient, section, kw: str,
     # else: renderer falls back to a geometric panel
 
 
+# ─── Topic video prefetch (Pexels only, PPTX only) ───────────────────────────
+#
+# Short cinematic clips embedded as real movies (poster frame = the section's
+# photo). Strictly budgeted: max clips per deck, max bytes per clip, ≤30s
+# duration — a deck must stay a deck, not become a download problem.
+
+_MAX_VIDEOS_PER_DECK = 2
+_MAX_VIDEO_BYTES = 12_000_000
+_MAX_VIDEO_SECONDS = 30
+
+
+async def _pexels_video_url(client: httpx.AsyncClient, kw: str) -> Optional[str]:
+    """Best small H.264 file for the keyword: landscape, 960–1920 wide, ≤30s."""
+    if not _PEXELS_KEY:
+        return None
+    r = await client.get(
+        "https://api.pexels.com/videos/search",
+        params={"query": kw, "per_page": 4, "orientation": "landscape"},
+        headers={"Authorization": _PEXELS_KEY, **_UA},
+    )
+    if r.status_code != 200:
+        return None
+    for video in r.json().get("videos", []):
+        if (video.get("duration") or 999) > _MAX_VIDEO_SECONDS:
+            continue
+        files = [f for f in video.get("video_files", [])
+                 if f.get("file_type") == "video/mp4" and 960 <= (f.get("width") or 0) <= 1920]
+        files.sort(key=lambda f: f.get("width") or 0)
+        if files:
+            return files[0].get("link")
+    return None
+
+
+async def _download_video(client: httpx.AsyncClient, url: str) -> Optional[str]:
+    try:
+        resp = await client.get(url, headers=_UA, timeout=30)
+        content = resp.content
+        if resp.status_code == 200 and b"ftyp" in content[4:12] \
+                and 100_000 <= len(content) <= _MAX_VIDEO_BYTES:
+            return f"data:video/mp4;base64,{base64.b64encode(content).decode('utf-8')}"
+    except Exception:
+        pass
+    return None
+
+
+async def _fetch_section_video(client: httpx.AsyncClient, section, kw: str) -> None:
+    try:
+        url = await _pexels_video_url(client, kw)
+        if url:
+            data = await _download_video(client, url)
+            if data:
+                section.video_data = data
+    except Exception:
+        pass  # video is a bonus; the photo path always remains
+
+
 async def prefetch_images(spec: DocumentSpec, timeout: float = 20.0,
                           width: int = 1600, height: int = 900) -> None:
     """Fill `section.image_data` for every section that requested an image.
@@ -262,6 +318,12 @@ async def prefetch_images(spec: DocumentSpec, timeout: float = 20.0,
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         tasks = [one(sec, sec.image_keyword.strip())
                  for sec in spec.sections if (sec.image_keyword or "").strip()]
+        # short cinematic clips for up to N interior sections (needs Pexels key)
+        if _PEXELS_KEY:
+            eligible = [s for s in spec.sections[1:-1]
+                        if (s.image_keyword or "").strip()][:_MAX_VIDEOS_PER_DECK]
+            tasks += [_fetch_section_video(client, s, s.image_keyword.strip())
+                      for s in eligible]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -270,6 +332,17 @@ def image_bytes(section) -> Optional[bytes]:
     """Decode a section's data-URI image to raw bytes (for python-pptx)."""
     data = str(section.image_data or "")
     if not data.startswith("data:image/"):
+        return None
+    try:
+        return base64.b64decode(data.split(",", 1)[1])
+    except Exception:
+        return None
+
+
+def video_bytes(section) -> Optional[bytes]:
+    """Decode a section's data-URI mp4 to raw bytes (for python-pptx)."""
+    data = str(getattr(section, "video_data", "") or "")
+    if not data.startswith("data:video/"):
         return None
     try:
         return base64.b64decode(data.split(",", 1)[1])
