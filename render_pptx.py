@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import io
 import random
+import re
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
@@ -29,7 +30,7 @@ from pptx import Presentation
 from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
 from pptx.enum.chart import XL_CHART_TYPE
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.oxml import parse_xml
 from pptx.oxml.ns import nsdecls, qn
 from pptx.util import Emu, Inches, Pt
@@ -130,6 +131,54 @@ def _oval(slide, l, t, d, color: str):
     return _solid(shape, color)
 
 
+def _dot_grid(slide, l, t, cols: int, rows: int, color: str,
+              dot: float = 0.055, gap: float = 0.21) -> int:
+    """Editorial dot-matrix accent (native vector, crisp at any zoom).
+    Returns the number of shapes added so callers can keep them static."""
+    n = 0
+    for r in range(rows):
+        for c in range(cols):
+            _oval(slide, l + c * gap, t + r * gap, dot, color)
+            n += 1
+    return n
+
+
+def _outline_ring(slide, l, t, d_in: float, color: str, weight: float = 2.25):
+    """Unfilled circle outline — a floating vector accent over photos."""
+    shape = slide.shapes.add_shape(9, Inches(l), Inches(t), Inches(d_in), Inches(d_in))
+    shape.fill.background()
+    shape.line.color.rgb = _rgb(color)
+    shape.line.width = Pt(weight)
+    return shape
+
+
+def _pct_of(value: str) -> Optional[float]:
+    """Extract a 0–100 percentage from a stat value like '95%' or '37.5 %'."""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*%", str(value or ""))
+    if not m:
+        return None
+    pct = float(m.group(1))
+    return pct if 0 < pct <= 100 else None
+
+
+def _progress_bar(slide, l, t, w, pct: float, accent: str, track: str, h: float = 0.13):
+    """Vector percentage bar: full-width track + accent fill. The 'SVG gauge'
+    of the deck — reads instantly and survives every Office/Keynote import."""
+    track_bar = slide.shapes.add_shape(5, Inches(l), Inches(t), Inches(w), Inches(h))
+    try:
+        track_bar.adjustments[0] = 0.5
+    except Exception:
+        pass
+    _solid(track_bar, track)
+    fill_w = max(w * pct / 100.0, h)
+    fill_bar = slide.shapes.add_shape(5, Inches(l), Inches(t), Inches(fill_w), Inches(h))
+    try:
+        fill_bar.adjustments[0] = 0.5
+    except Exception:
+        pass
+    _solid(fill_bar, accent)
+
+
 def _num_circle(slide, l, t, d, idx: int, accent: str, font: str):
     """The deck's repeated motif: a numbered accent circle."""
     circ = _oval(slide, l, t, d, accent)
@@ -152,10 +201,12 @@ def _num_circle(slide, l, t, d, idx: int, accent: str, font: str):
 
 def _txt(slide, text, l, t, w, h, size=15.0, bold=False, color="#FFFFFF",
          align=PP_ALIGN.LEFT, italic=False, font="Calibri", fit=True,
-         min_size: Optional[float] = None):
+         min_size: Optional[float] = None, anchor=None):
     """Add a textbox with word-wrap ON, zero internal margins, and the auto-fit
     guard: if the estimated rendered height exceeds the box, the size steps
-    down; at the floor the text is word-clipped. Overflow cannot ship."""
+    down; at the floor the text is word-clipped. Overflow cannot ship.
+    `anchor=MSO_ANCHOR.MIDDLE` vertically centers short text in tall boxes so
+    cards never read as top-heavy with dead space below."""
     text = str(text or "")
     if fit:
         size = fit_text_size(text, w, h, size, min_pt=min_size, bold=bold)
@@ -164,6 +215,11 @@ def _txt(slide, text, l, t, w, h, size=15.0, bold=False, color="#FFFFFF",
     tb = slide.shapes.add_textbox(Inches(l), Inches(t), Inches(w), Inches(h))
     tf = tb.text_frame
     tf.word_wrap = True
+    if anchor is not None:
+        try:
+            tf.vertical_anchor = anchor
+        except Exception:
+            pass
     for m in ("margin_left", "margin_right", "margin_top", "margin_bottom"):
         setattr(tf, m, 0)
     p = tf.paragraphs[0]
@@ -212,9 +268,31 @@ def _bullets(slide, items: List[str], l, t, w, h, size=13.0, color="#FFFFFF",
     return tb
 
 
+def _sentences(text: str, limit: int = 3) -> List[str]:
+    parts = [s.strip() for s in re.split(r"(?<=[.!?])\s+", str(text or ""))
+             if len(s.strip()) > 12]
+    return parts[:limit]
+
+
+def _rail_content(sec: Section, n: int = 3) -> List[str]:
+    """Side-rail / support content that can NEVER be empty: highlights → stat
+    contexts → any short-point content → body/notes sentences → callout. An
+    empty panel is a design bug; every container must earn its place."""
+    items = [h for h in sec.highlights if str(h).strip()]
+    if not items:
+        items = [st.context for st in sec.stats if st.context]
+    if not items:
+        items = sec.fallback_highlights()
+    if not items:
+        items = _sentences(sec.body) or _sentences(sec.speaker_notes)
+    if not items and sec.callout:
+        items = [sec.callout]
+    return [str(i) for i in items[:n]]
+
+
 # ─── Photos (cover-cropped, never distorted) ──────────────────────────────────
 
-def _photo(slide, section: Section, l, t, w, h) -> bool:
+def _photo(slide, section: Section, l, t, w, h, shadow: bool = True) -> bool:
     """Place the prefetched topic image filling the box edge-to-edge with a
     center crop (PowerPoint srcRect), keeping aspect. Returns True if placed."""
     raw = assets.image_bytes(section)
@@ -235,10 +313,50 @@ def _photo(slide, section: Section, l, t, w, h) -> bool:
                 frac = 1 - img_aspect / box_aspect
                 pic.crop_top = frac / 2
                 pic.crop_bottom = frac / 2
-        _soft_shadow(pic)
+        if shadow:
+            _soft_shadow(pic)
         return True
     except Exception:
         return False
+
+
+def _scrim(slide, l, t, w, h, color: str, a1: int = 94, a2: int = 42,
+           angle: float = 0.0, color2: str = None):
+    """Semi-transparent gradient overlay laid over a full-bleed photo so text
+    stays readable — the classic editorial 'color scrim' treatment. Alpha per
+    stop needs raw OOXML (python-pptx exposes no fill transparency)."""
+    shape = slide.shapes.add_shape(1, Inches(l), Inches(t), Inches(w), Inches(h))
+    _grad(shape, color, color2 or color, angle)
+    try:
+        grad_fill = shape._element.spPr.find(qn('a:gradFill'))
+        stops = grad_fill.findall(qn('a:gsLst') + '/' + qn('a:gs'))
+        for gs, alpha in zip(stops, (a1, a2)):
+            clr = gs.find(qn('a:srgbClr'))
+            if clr is not None:
+                clr.append(parse_xml(
+                    f'<a:alpha {nsdecls("a")} val="{int(alpha * 1000)}"/>'))
+    except Exception:
+        pass  # opaque scrim still keeps text readable
+    return shape
+
+
+def _hero_photo(d, slide, sec: Section, drama: bool = False) -> int:
+    """Full-bleed photo + dominant-color scrim (dense on the left where the
+    text sits, lifting toward the right so the photo shows through). `drama`
+    (covers/closings) pushes the contrast harder — near-black over the text,
+    the photo punching through clean on the right — plus a bottom scrim so
+    footer/tagline text always reads. Returns static shape count (0 = no photo)."""
+    if not _photo(slide, sec, 0, 0, SLIDE_W, SLIDE_H, shadow=False):
+        return 0
+    if drama:
+        _scrim(slide, 0, 0, SLIDE_W, SLIDE_H, _shade(d.DOM, 0.42), a1=98, a2=28,
+               angle=0.0, color2=_shade(d.DOM, 0.62))
+        _scrim(slide, 0, 4.9, SLIDE_W, SLIDE_H - 4.9, _shade(d.DOM, 0.38),
+               a1=0, a2=82, angle=90.0)
+        return 3
+    _scrim(slide, 0, 0, SLIDE_W, SLIDE_H, _shade(d.DOM, 0.55), a1=96, a2=45,
+           angle=0.0, color2=_shade(d.DOM, 0.75))
+    return 2
 
 
 # ─── Motion: entrance animations, transitions (raw OOXML) ────────────────────
@@ -263,16 +381,19 @@ _ENTRANCES = {
     "strips":     ("strips(downRight)", 19),
 }
 
+# Keynote-safe motion. Keynote (and older PowerPoint) silently DROP effects it
+# can't map — blinds/strips/randombar/wheel entrances and cut/zoom/split
+# transitions import as "no animation", which reads as a bug. Both pools are
+# limited to effects that survive the PowerPoint → Keynote round-trip.
+_DECK_ENTRANCE_KEYS = ["fade", "wipe_up", "wipe_right", "wipe_left", "dissolve",
+                       "circle", "diamond"]
+
 _TRANSITIONS = [
     '<p:fade/>',
     '<p:fade thruBlk="1"/>',
     '<p:push dir="l"/>',
     '<p:push dir="u"/>',
-    '<p:cover dir="d"/>',
     '<p:wipe dir="d"/>',
-    '<p:split orient="horz" dir="out"/>',
-    '<p:zoom dir="in"/>',
-    '<p:cut/>',
 ]
 
 
@@ -319,20 +440,35 @@ def _build_timing(specs: list):
     return parse_xml(xml)
 
 
+def _shuffle_no_adjacent(items: list, rng: random.Random, key=lambda x: x) -> list:
+    """Shuffle so no two neighbours share a key — including the wrap-around,
+    since the list is cycled across slides (push(l) next to push(u) still
+    reads as 'push, push')."""
+    items = list(items)
+    for _ in range(40):
+        rng.shuffle(items)
+        n = len(items)
+        if n < 2 or all(key(items[i]) != key(items[(i + 1) % n]) for i in range(n)):
+            break
+    return items
+
+
 def _set_transition(slide, transition_xml: str):
     """Inject <p:transition>. MUST run before _animate to keep schema order."""
     xml = f'<p:transition {nsdecls("p")} spd="med">{transition_xml}</p:transition>'
     slide._element.append(parse_xml(xml))
 
 
-def _animate(slide, filt_key: str, max_shapes: int = 9, step: int = 170, dur: int = 460):
-    """Auto-playing staggered entrance (background shape stays static)."""
+def _animate(slide, filt_key: str, max_shapes: int = 9, step: int = 170, dur: int = 460,
+             skip: int = 1):
+    """Auto-playing staggered entrance. `skip` = leading static shapes
+    (background rect, or full-bleed photo + scrim) that must not animate."""
     shapes = list(slide.shapes)
-    if len(shapes) < 2:
+    if len(shapes) <= skip:
         return
     filt, preset = _ENTRANCES.get(filt_key, _ENTRANCES["fade"])
     specs = [(sh.shape_id, 100 + i * step, dur, filt, preset)
-             for i, sh in enumerate(shapes[1:max_shapes + 1])]
+             for i, sh in enumerate(shapes[skip:skip + max_shapes])]
     if specs:
         slide._element.append(_build_timing(specs))
 
@@ -397,7 +533,11 @@ def _native_chart(slide, section: Section, l, t, w, h, theme: Theme, on_dark: bo
         series = plot.series[0]
         if kind == "line":
             series.format.line.color.rgb = _rgb(theme.accent)
-            series.format.line.width = Pt(2.5)
+            series.format.line.width = Pt(2.75)
+            try:
+                series.smooth = True   # curved vector line, not a polyline
+            except Exception:
+                pass
         else:
             series.format.fill.solid()
             series.format.fill.fore_color.rgb = _rgb(theme.accent)
@@ -498,15 +638,26 @@ class _Deck:
         self.light_bg(slide)
         return False
 
+    def photo_band(self, slide, sec: Section) -> int:
+        """Full-width photo strip with scrim behind the eyebrow/title zone —
+        turns any text-heavy layout into an editorial header. Returns the
+        number of static shapes added (0 when the section has no image)."""
+        if not _photo(slide, sec, 0, 0, SLIDE_W, 2.02, shadow=False):
+            return 0
+        _scrim(slide, 0, 0, SLIDE_W, 2.02, _shade(self.DOM, 0.5), a1=95, a2=62,
+               angle=0.0, color2=_shade(self.DOM, 0.68))
+        return 2
+
     # furniture -----------------------------------------------------------
 
-    def footer(self, slide, idx: int, dark: bool):
+    def footer(self, slide, idx: int, dark: bool, right_edge: float = None):
         muted = "#FFFFFF" if dark else self.BODY
         acc = self.acc_dark if dark else self.acc_light
+        right_edge = SLIDE_W - MARGIN if right_edge is None else right_edge
         title = clip_chars(self.spec.title.upper(), 70)
-        _txt(slide, title, MARGIN, 7.05, 9, 0.3, size=8, color=muted,
-             font=self.F["data"], fit=False)
-        _txt(slide, f"{idx + 1:02d} / {self.total:02d}", SLIDE_W - 1.5 - MARGIN, 7.05,
+        _txt(slide, title, MARGIN, 7.05, min(9.0, right_edge - MARGIN - 1.7), 0.3,
+             size=8, color=muted, font=self.F["data"], fit=False)
+        _txt(slide, f"{idx + 1:02d} / {self.total:02d}", right_edge - 1.5, 7.05,
              1.5, 0.3, size=8, color=acc, align=PP_ALIGN.RIGHT, font=self.F["data"], fit=False)
 
     def eyebrow(self, slide, idx: int, text: str, dark: bool):
@@ -522,20 +673,40 @@ class _Deck:
 
 
 def _build_title(d: _Deck, slide, sec: Section, idx: int):
-    _grad_rect(slide, 0, 0, SLIDE_W, SLIDE_H, _shade(d.DOM, 0.6), d.DOM, 120)
-    ring = slide.shapes.add_shape(9, Inches(9.4), Inches(-1.8), Inches(6.2), Inches(6.2))
-    _grad(ring, _shade(d.SEC, 1.12), d.SEC, 120); _soft_shadow(ring, blur_pt=24, dist_pt=0, alpha_pct=22)
-    ring2 = slide.shapes.add_shape(9, Inches(11.1), Inches(4.7), Inches(3.4), Inches(3.4))
-    _grad(ring2, d.ACC, _shade(d.ACC, 0.7), 120); _soft_shadow(ring2, blur_pt=18, dist_pt=0, alpha_pct=26)
+    # Full-bleed topic photo behind a color scrim when available — the single
+    # biggest "designed, not generated" signal a cover can send.
+    has_photo = _hero_photo(d, slide, sec, drama=True)
+    if has_photo:
+        static = has_photo
+        static += _dot_grid(slide, 11.05, 5.55, 6, 4, d.acc_dark)
+        _outline_ring(slide, 10.15, 1.05, 2.9, d.acc_dark, weight=2.0)
+        static += 1
+    else:
+        _grad_rect(slide, 0, 0, SLIDE_W, SLIDE_H, _shade(d.DOM, 0.6), d.DOM, 120)
+        static = 1 + _dot_grid(slide, 0.62, 5.9, 8, 3, _shade(d.SEC, 1.35))
+        ring = slide.shapes.add_shape(9, Inches(9.4), Inches(-1.8), Inches(6.2), Inches(6.2))
+        _grad(ring, _shade(d.SEC, 1.12), d.SEC, 120); _soft_shadow(ring, blur_pt=24, dist_pt=0, alpha_pct=22)
+        ring2 = slide.shapes.add_shape(9, Inches(11.1), Inches(4.7), Inches(3.4), Inches(3.4))
+        _grad(ring2, d.ACC, _shade(d.ACC, 0.7), 120); _soft_shadow(ring2, blur_pt=18, dist_pt=0, alpha_pct=26)
 
     tagline = sec.tagline
     if d.theme.aesthetic_label and d.theme.aesthetic_label not in tagline:
         tagline = f"{d.theme.aesthetic_label}  |  {tagline}".strip(" |")
     if d.theme.aesthetic_label:
-        _txt(slide, d.theme.aesthetic_label.upper(), MARGIN, 1.0, 9.5, 0.4, size=10,
-             bold=True, color=d.acc_dark, font=d.F["data"], fit=False)
-    _txt(slide, sec.heading or d.spec.title, MARGIN - 0.02, 1.7, 9.6, 2.9,
-         size=d.S.cover_title, bold=True, color="#FFFFFF", font=d.F["display"], min_size=28)
+        # kicker chip — small accent-filled label above the headline
+        label = clip_chars(d.theme.aesthetic_label.upper(), 30)
+        chip_w = min(4.6, 0.42 + len(label) * 0.085)
+        chip = _round_card(slide, MARGIN, 0.92, chip_w, 0.42, color=d.ACC,
+                           radius=0.5, shadow=False)
+        ctf = chip.text_frame
+        ctf.word_wrap = False
+        ctf.paragraphs[0].text = label
+        r0 = ctf.paragraphs[0].runs[0]
+        r0.font.size = Pt(10); r0.font.bold = True
+        r0.font.color.rgb = _rgb(readable_on(d.ACC)); r0.font.name = d.F["data"]
+    _txt(slide, sec.heading or d.spec.title, MARGIN - 0.02, 1.65, 9.6, 3.0,
+         size=(d.S.cover_title + 8 if has_photo else d.S.cover_title), bold=True,
+         color="#FFFFFF", font=d.F["display"], min_size=28)
     subtitle = sec.subtitle or d.spec.subtitle
     if subtitle:
         _txt(slide, subtitle, MARGIN, 4.9, 9.2, 1.1, size=20, color=d.TINT, font=d.F["body"])
@@ -543,12 +714,21 @@ def _build_title(d: _Deck, slide, sec: Section, idx: int):
         _txt(slide, tagline, MARGIN, 6.65, 10.5, 0.5, size=11.5, color=d.MUTED_DARK, font=d.F["body"])
     _txt(slide, f"01 / {d.total:02d}", SLIDE_W - 1.5 - MARGIN, 6.7, 1.5, 0.4, size=11,
          color=d.acc_dark, align=PP_ALIGN.RIGHT, font=d.F["data"], fit=False)
+    return static
 
 
 def _build_closing(d: _Deck, slide, sec: Section, idx: int):
-    _grad_rect(slide, 0, 0, SLIDE_W, SLIDE_H, _shade(d.DOM, 0.6), d.DOM, 120)
-    ring = slide.shapes.add_shape(9, Inches(8.2), Inches(0.4), Inches(6.2), Inches(6.2))
-    _grad(ring, _shade(d.SEC, 1.1), d.SEC, 120); _soft_shadow(ring, blur_pt=24, dist_pt=0, alpha_pct=22)
+    static = _hero_photo(d, slide, sec, drama=True)
+    if static:
+        static += _dot_grid(slide, 11.05, 0.62, 6, 4, d.acc_dark)
+        _outline_ring(slide, 10.5, 4.6, 2.4, d.acc_dark, weight=2.0)
+        static += 1
+    else:
+        static = 1
+        _grad_rect(slide, 0, 0, SLIDE_W, SLIDE_H, _shade(d.DOM, 0.6), d.DOM, 120)
+        static += _dot_grid(slide, 0.62, 6.15, 8, 2, _shade(d.SEC, 1.35))
+        ring = slide.shapes.add_shape(9, Inches(8.2), Inches(0.4), Inches(6.2), Inches(6.2))
+        _grad(ring, _shade(d.SEC, 1.1), d.SEC, 120); _soft_shadow(ring, blur_pt=24, dist_pt=0, alpha_pct=22)
     _txt(slide, "IN CLOSING", MARGIN, 0.7, 5, 0.4, size=10, bold=True,
          color=d.acc_dark, font=d.F["data"], fit=False)
     _txt(slide, sec.heading or "Thank you", MARGIN - 0.02, 1.5, 9.4, 2.5, size=40,
@@ -569,11 +749,15 @@ def _build_closing(d: _Deck, slide, sec: Section, idx: int):
         _txt(slide, sec.tagline, MARGIN, 5.65, 9, 0.6, size=13.5, color=d.TINT,
              italic=True, font=d.F["body"])
     d.footer(slide, idx, dark=True)
+    return static
 
 
 def _build_stat(d: _Deck, slide, sec: Section, idx: int):
     d.dark_bg(slide)          # stat slides always sit on the dominant color
     dark = True
+    static = 1 + d.photo_band(slide, sec)
+    if static == 1:           # no photo band → vector dot accent instead
+        static += _dot_grid(slide, 11.35, 0.52, 5, 3, _shade(d.SEC, 1.3))
     d.eyebrow(slide, idx, sec.eyebrow or "KEY METRICS", dark)
     d.slide_title(slide, sec.heading, dark)
     stats = sec.stats[:3]
@@ -586,15 +770,25 @@ def _build_stat(d: _Deck, slide, sec: Section, idx: int):
              bold=True, color="#FFFFFF", align=PP_ALIGN.CENTER, font=d.F["data"], min_size=24)
         _txt(slide, st.label.upper(), cx + 0.25, 4.8, card_w - 0.5, 0.5, size=12.5,
              bold=True, color=d.acc_dark, align=PP_ALIGN.CENTER, font=d.F["heading"], min_size=9)
-        _txt(slide, st.context, cx + 0.3, 5.35, card_w - 0.6, 0.95, size=10.5,
-             color=d.TINT, align=PP_ALIGN.LEFT, font=d.F["body"])
+        pct = _pct_of(st.value)
+        if pct is not None:   # percentage stat → vector gauge bar
+            _progress_bar(slide, cx + 0.32, 5.38, card_w - 0.64, pct,
+                          d.ACC, _shade(d.SEC, 1.45))
+            _txt(slide, st.context, cx + 0.3, 5.68, card_w - 0.6, 0.7, size=10,
+                 color=d.TINT, align=PP_ALIGN.LEFT, font=d.F["body"])
+        else:
+            _txt(slide, st.context, cx + 0.3, 5.35, card_w - 0.6, 0.95, size=10.5,
+                 color=d.TINT, align=PP_ALIGN.LEFT, font=d.F["body"])
     d.footer(slide, idx, dark)
+    return static
 
 
 def _build_two_col(d: _Deck, slide, sec: Section, idx: int):
     dark = d.content_bg(slide)
-    d.eyebrow(slide, idx, sec.eyebrow or "COMPARISON", dark)
-    d.slide_title(slide, sec.heading, dark)
+    band = d.photo_band(slide, sec)
+    head_dark = dark or bool(band)
+    d.eyebrow(slide, idx, sec.eyebrow or "COMPARISON", head_dark)
+    d.slide_title(slide, sec.heading, head_dark)
     col_w = (SLIDE_W - 2 * MARGIN - GAP) / 2
     left_x, right_x = MARGIN, MARGIN + col_w + GAP
     # left: light card; right: deep card — contrast without any edge stripes
@@ -619,10 +813,12 @@ def _build_two_col(d: _Deck, slide, sec: Section, idx: int):
              right_x + 0.35, 3.05, col_w - 0.7, 3.5, size=13.5, color="#FFFFFF",
              marker="→", font=d.F["body"])
     d.footer(slide, idx, dark)
+    return 1 + band
 
 
 def _build_chart(d: _Deck, slide, sec: Section, idx: int):
     d.dark_bg(slide)
+    band = d.photo_band(slide, sec)
     d.eyebrow(slide, idx, sec.eyebrow or "DATA", True)
     d.slide_title(slide, sec.heading, True)
     panel = "#0F1218"
@@ -639,14 +835,22 @@ def _build_chart(d: _Deck, slide, sec: Section, idx: int):
     _num_circle(slide, 9.4, 2.65, 0.38, idx + 1, d.ACC, d.F["data"])
     _txt(slide, "WHAT IT MEANS", 9.9, 2.72, 2.7, 0.35, size=10, bold=True,
          color=d.acc_dark, font=d.F["data"], fit=False)
-    rail = sec.highlights or [st.context for st in sec.stats if st.context]
-    _bullets(slide, [r for r in rail if r][:4], 9.4, 3.3, 3.1, 3.2, size=11.5,
+    _bullets(slide, _rail_content(sec, 4), 9.4, 3.3, 3.1, 3.2, size=11.5,
              color="#FFFFFF", marker="◆", font=d.F["body"])
     d.footer(slide, idx, True)
+    return 1 + band
 
 
 def _build_quote(d: _Deck, slide, sec: Section, idx: int):
-    _grad_rect(slide, 0, 0, SLIDE_W, SLIDE_H, _shade(d.DOM, 0.62), d.DOM, 125)
+    # Photo-backed quotes get a near-opaque scrim: the image adds atmosphere,
+    # the words stay the hero.
+    static = 1
+    if _photo(slide, sec, 0, 0, SLIDE_W, SLIDE_H, shadow=False):
+        static = 2
+        _scrim(slide, 0, 0, SLIDE_W, SLIDE_H, _shade(d.DOM, 0.5), a1=93, a2=82,
+               angle=90.0, color2=_shade(d.DOM, 0.66))
+    else:
+        _grad_rect(slide, 0, 0, SLIDE_W, SLIDE_H, _shade(d.DOM, 0.62), d.DOM, 125)
     _txt(slide, "“", 0.45, -0.35, 3, 2.6, size=150, color=_shade(d.SEC, 1.2), bold=True,
          font=d.F["display"], fit=False)
     quote = sec.callout or sec.body
@@ -655,78 +859,149 @@ def _build_quote(d: _Deck, slide, sec: Section, idx: int):
     if sec.attribution:
         _txt(slide, sec.attribution, 1.05, 5.6, 8.5, 0.5, size=13, color=d.acc_dark,
              bold=True, font=d.F["data"])
-    hi = sec.highlights or sec.statements
-    for hj, h in enumerate([x for x in hi if str(x).strip()][:3]):
+    hi = [x for x in (sec.highlights or sec.statements) if str(x).strip()] or \
+        _rail_content(sec, 3)
+    hi = [h for h in hi if str(h).strip() != str(quote).strip()]
+    for hj, h in enumerate(hi[:3]):
         hy = 1.35 + hj * 1.75
         _round_card(slide, 10.2, hy, 2.5, 1.5, grad=(_shade(d.SEC, 1.1), d.SEC, 120), radius=0.08)
         _num_circle(slide, 10.4, hy + 0.18, 0.3, hj + 1, d.ACC, d.F["data"])
         _txt(slide, str(h), 10.4, hy + 0.58, 2.1, 0.82, size=10.5, color="#FFFFFF",
              font=d.F["body"])
     d.footer(slide, idx, True)
+    return static
 
 
 def _build_image_text(d: _Deck, slide, sec: Section, idx: int):
     dark = d.content_bg(slide)
+    # Editorial split: full-height photo bleeding off the right edge — the
+    # magazine layout that makes a slide read as designed rather than filled.
+    split_x = 8.15
+    has_photo = _photo(slide, sec, split_x, 0, SLIDE_W - split_x, SLIDE_H, shadow=False)
+    text_right = split_x - 0.45 if has_photo else 8.5
     d.eyebrow(slide, idx, sec.eyebrow or "OVERVIEW", dark)
-    d.slide_title(slide, sec.heading, dark, width=8.4)
+    d.slide_title(slide, sec.heading, dark, width=text_right - MARGIN)
     body_color = "#FFFFFF" if dark else d.BODY
-    _txt(slide, sec.body, MARGIN, 2.3, 7.9, 4.4, size=d.S.body, color=body_color,
-         font=d.F["body"], min_size=11)
-    vis_x, vis_y, vis_w, vis_h = 8.9, 2.15, SLIDE_W - 8.9 - MARGIN, 4.6
-    if _photo(slide, sec, vis_x, vis_y, vis_w, vis_h):
-        if sec.fallback_highlights():
-            chip = _round_card(slide, vis_x + 0.25, vis_y + vis_h - 1.15, vis_w - 0.5, 0.9,
-                               color=_shade(d.DOM, 0.85), radius=0.12, shadow=True)
+    text_w = text_right - MARGIN
+    # structured lower half: body up top, then numbered insight rows — a short
+    # paragraph must never leave half a slide of dead space
+    chip_text = sec.callout or (sec.fallback_highlights() or [""])[0]
+    rows = [r for r in _rail_content(sec, 4)
+            if r not in (sec.body or "") and r.strip() != str(chip_text).strip()][:3] \
+        if has_photo else []    # no-photo branch shows these in its side panel
+    body_h = 2.35 if rows else 4.4
+    _txt(slide, sec.body, MARGIN, 2.3, text_w, body_h, size=d.S.body,
+         color=body_color, font=d.F["body"], min_size=11)
+    if rows:
+        _rect(slide, MARGIN, 4.85, 1.1, 0.03, d.ACC)   # accent divider
+        row_txt = "#FFFFFF" if dark else d.BODY
+        for rj, r in enumerate(rows):
+            ry = 5.05 + rj * 0.62
+            _num_circle(slide, MARGIN, ry, 0.32, rj + 1, d.ACC, d.F["data"])
+            _txt(slide, str(r), MARGIN + 0.5, ry + 0.015, text_w - 0.5, 0.56,
+                 size=11.5, color=row_txt, font=d.F["body"], min_size=9,
+                 anchor=MSO_ANCHOR.MIDDLE)
+    if has_photo:
+        if str(chip_text).strip():
+            chip = _round_card(slide, split_x + 0.35, SLIDE_H - 1.5, SLIDE_W - split_x - 0.9,
+                               1.0, color=_shade(d.DOM, 0.85), radius=0.12, shadow=True)
             ctf = chip.text_frame
             ctf.word_wrap = True
-            ctf.paragraphs[0].text = clip_words(str(sec.fallback_highlights()[0]), 14)
+            try:
+                ctf.vertical_anchor = MSO_ANCHOR.MIDDLE
+            except Exception:
+                pass
+            ctf.paragraphs[0].text = clip_words(str(chip_text), 14)
             r0 = ctf.paragraphs[0].runs[0]
             r0.font.size = Pt(10.5)
             r0.font.color.rgb = _rgb("#FFFFFF")
             r0.font.name = d.F["body"]
+        d.footer(slide, idx, dark, right_edge=text_right)
     else:
+        vis_x, vis_y, vis_w, vis_h = 8.9, 2.15, SLIDE_W - 8.9 - MARGIN, 4.6
         _round_card(slide, vis_x, vis_y, vis_w, vis_h, grad=(_shade(d.SEC, 1.1), d.SEC, 120), radius=0.05)
         _num_circle(slide, vis_x + 0.3, vis_y + 0.3, 0.38, idx + 1, d.ACC, d.F["data"])
         _txt(slide, "KEY DATA", vis_x + 0.82, vis_y + 0.37, vis_w - 1.1, 0.35, size=10,
              bold=True, color=d.acc_dark, font=d.F["data"], fit=False)
         _bullets(slide, sec.fallback_highlights()[:4], vis_x + 0.3, vis_y + 0.95, vis_w - 0.6,
                  vis_h - 1.25, size=12, color="#FFFFFF", marker="◆", font=d.F["body"])
-    d.footer(slide, idx, dark)
+        d.footer(slide, idx, dark)
 
 
 def _build_cards(d: _Deck, slide, sec: Section, idx: int):
+    """Bento grid: one featured accent tile + varied-size neighbours instead of
+    a monotonous 2x2 — the asymmetry is what reads as designed."""
     dark = d.content_bg(slide)
-    d.eyebrow(slide, idx, sec.eyebrow or "TAKEAWAYS", dark)
-    d.slide_title(slide, sec.heading, dark)
+    band = d.photo_band(slide, sec)
+    head_dark = dark or bool(band)
+    d.eyebrow(slide, idx, sec.eyebrow or "TAKEAWAYS", head_dark)
+    d.slide_title(slide, sec.heading, head_dark)
     items = [(t.label, t.value) for t in sec.tiles[:4]] or \
             [("", h) for h in sec.fallback_highlights()[:4]]
-    cols = 2
-    card_w = (SLIDE_W - 2 * MARGIN - GAP) / cols
-    card_h = 2.15
-    for i, (label, value) in enumerate(items):
-        cx = MARGIN + (i % cols) * (card_w + GAP)
-        cy = 2.3 + (i // cols) * (card_h + GAP)
-        if dark:
-            _round_card(slide, cx, cy, card_w, card_h, grad=(_shade(d.SEC, 1.12), d.SEC, 120), radius=0.06)
-            txt_color = "#FFFFFF"
+
+    top, total_h = 2.3, 4.35
+    total_w = SLIDE_W - 2 * MARGIN
+    feat_w = 4.9
+    side_w = total_w - feat_w - GAP
+    half_h = (total_h - GAP) / 2
+    half_w = (side_w - GAP) / 2
+    mirror = (d.theme.seed + idx) % 2 == 1
+    feat_x = MARGIN + (total_w - feat_w if mirror else 0)
+    side_x = MARGIN + (0 if mirror else feat_w + GAP)
+
+    # cell geometry per item count: featured tall + wide + squares
+    if len(items) >= 4:
+        cells = [(feat_x, top, feat_w, total_h),
+                 (side_x, top, side_w, half_h),
+                 (side_x, top + half_h + GAP, half_w, half_h),
+                 (side_x + half_w + GAP, top + half_h + GAP, half_w, half_h)]
+    elif len(items) == 3:
+        cells = [(feat_x, top, feat_w, total_h),
+                 (side_x, top, side_w, half_h),
+                 (side_x, top + half_h + GAP, side_w, half_h)]
+    else:
+        cells = [(MARGIN + i * (total_w + GAP) / 2, top,
+                  (total_w - GAP) / 2, total_h) for i in range(len(items))]
+
+    for i, ((label, value), (cx, cy, cw, ch)) in enumerate(zip(items, cells)):
+        featured = i == 0 and len(items) >= 3
+        if featured:
+            _round_card(slide, cx, cy, cw, ch, grad=(d.ACC, _shade(d.ACC, 0.78), 120),
+                        radius=0.07)
+            txt_color = readable_on(d.ACC)
+            circ_color, label_color = d.DOM, txt_color
+        elif dark:
+            _round_card(slide, cx, cy, cw, ch, grad=(_shade(d.SEC, 1.12), d.SEC, 120), radius=0.07)
+            txt_color, circ_color, label_color = "#FFFFFF", d.ACC, d.acc_dark
         else:
-            _round_card(slide, cx, cy, card_w, card_h, grad=("#FFFFFF", d.TINT, 120), radius=0.06)
-            txt_color = d.BODY
-        _num_circle(slide, cx + 0.3, cy + 0.3, 0.42, i + 1, d.ACC, d.F["data"])
+            _round_card(slide, cx, cy, cw, ch, grad=("#FFFFFF", d.TINT, 120), radius=0.07)
+            txt_color, circ_color, label_color = d.BODY, d.ACC, d.acc_light
+        _num_circle(slide, cx + 0.3, cy + 0.3, 0.42, i + 1, circ_color, d.F["data"])
         if label and not label.isdigit():
-            _txt(slide, label.upper(), cx + 0.92, cy + 0.38, card_w - 1.2, 0.35,
-                 size=10.5, bold=True, color=d.acc_dark if dark else d.acc_light,
-                 font=d.F["data"], fit=False)
-        _txt(slide, value, cx + 0.92, cy + 0.82, card_w - 1.2, card_h - 1.05,
-             size=12.5, color=txt_color, font=d.F["body"], min_size=10)
+            _txt(slide, label.upper(), cx + 0.92, cy + 0.38, cw - 1.2, 0.35,
+                 size=10.5, bold=True, color=label_color, font=d.F["data"], fit=False)
+        body_size = 17.0 if featured else 12.5
+        _txt(slide, value, cx + 0.35 if featured else cx + 0.92,
+             cy + 0.95 if featured else cy + 0.82,
+             cw - 0.7 if featured else cw - 1.2,
+             ch - 1.25 if featured else ch - 1.05,
+             size=body_size, bold=featured, color=txt_color, font=d.F["body"],
+             min_size=10, anchor=MSO_ANCHOR.MIDDLE)
     d.footer(slide, idx, dark)
+    return 1 + band
 
 
 def _build_timeline(d: _Deck, slide, sec: Section, idx: int):
     dark = d.content_bg(slide)
-    d.eyebrow(slide, idx, sec.eyebrow or "TIMELINE", dark)
-    d.slide_title(slide, sec.heading, dark)
+    band = d.photo_band(slide, sec)
+    head_dark = dark or bool(band)
+    d.eyebrow(slide, idx, sec.eyebrow or "TIMELINE", head_dark)
+    d.slide_title(slide, sec.heading, head_dark)
     steps = sec.steps[:4]
+    # connector spine behind the cards — visible in the gaps, reads as a
+    # timeline instead of four floating boxes
+    _rect(slide, MARGIN + 0.2, 2.87, SLIDE_W - 2 * (MARGIN + 0.2), 0.035,
+          d.ACC if dark else _shade(d.ACC, 1.0))
     card_w = (SLIDE_W - 2 * MARGIN - (len(steps) - 1) * GAP) / max(1, len(steps))
     for i, step in enumerate(steps):
         cx = MARGIN + i * (card_w + GAP)
@@ -746,6 +1021,7 @@ def _build_timeline(d: _Deck, slide, sec: Section, idx: int):
         _txt(slide, step.description, cx + 0.3, 4.55, card_w - 0.6, 1.95, size=11,
              color=txt_color, font=d.F["body"], min_size=9)
     d.footer(slide, idx, dark)
+    return 1 + band
 
 
 _BUILDERS = {
@@ -797,17 +1073,24 @@ def render_pptx(spec: DocumentSpec, theme: Theme, seed: Optional[int] = None) ->
     deck_seed = theme.seed if seed is None else seed
     plan_pptx_layouts(spec.sections, deck_seed)
 
-    # Per-deck motion identity — cohesive transition, shuffled entrance order.
+    # Motion identity — freshly randomized every generation AND varied per
+    # slide: both pools are shuffled with the deck seed, then cycled, so two
+    # runs get different effect sequences and consecutive slides never share
+    # the same entrance or transition.
     motion_rng = random.Random(deck_seed)
-    deck_transition = motion_rng.choice(_TRANSITIONS)
-    entrance_keys = list(_ENTRANCES.keys())
-    motion_rng.shuffle(entrance_keys)
+    entrance_keys = _shuffle_no_adjacent(
+        _DECK_ENTRANCE_KEYS, motion_rng, key=lambda k: k.split('_')[0])
+    transitions = _shuffle_no_adjacent(
+        _TRANSITIONS, motion_rng, key=lambda t: t.split()[0].strip('<>/'))
+    anim_step = motion_rng.choice((140, 170, 200))   # stagger rhythm per deck
+    anim_dur = motion_rng.choice((420, 460, 520))    # entrance speed per deck
 
     d = _Deck(prs, spec, theme)
     for si, sec in enumerate(spec.sections):
         slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
         builder = _BUILDERS.get(sec.layout, _build_image_text)
-        builder(d, slide, sec, si)
+        # builders return the count of leading static shapes (bg / photo+scrim)
+        static = builder(d, slide, sec, si) or 1
 
         # speaker notes on every slide
         notes = sec.speaker_notes or (
@@ -815,8 +1098,9 @@ def render_pptx(spec: DocumentSpec, theme: Theme, seed: Optional[int] = None) ->
         slide.notes_slide.notes_text_frame.text = notes
 
         # motion: transition MUST precede timing in the slide XML
-        _set_transition(slide, deck_transition)
-        _animate(slide, entrance_keys[si % len(entrance_keys)])
+        _set_transition(slide, transitions[si % len(transitions)])
+        _animate(slide, entrance_keys[si % len(entrance_keys)],
+                 step=anim_step, dur=anim_dur, skip=static)
 
     # clickable navigation — added after all slides exist so targets resolve
     all_slides = list(prs.slides)

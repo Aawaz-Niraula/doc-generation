@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 from typing import Optional
 
@@ -131,15 +132,24 @@ _FORMAT_DIRECTIVES = {
 }
 
 
-def _system_prompt(section_count: int, doc_kind: str = "pdf") -> str:
+def _system_prompt(section_count: int, doc_kind: str = "pdf",
+                   suggested_direction: str = "") -> str:
     aesthetics = ", ".join(AESTHETIC_DIRECTIONS)
     directive = _FORMAT_DIRECTIVES.get(doc_kind, _FORMAT_DIRECTIVES["pdf"])
+    # A different direction is dealt to every generation — without this, the
+    # model gravitates to the same aesthetic for the same topic every run and
+    # decks become repetitive.
+    dealt = (f"\n- THIS RUN'S DEALT DIRECTION: '{suggested_direction}'. Commit to it "
+             f"unless it genuinely clashes with the topic — in that case pick the "
+             f"NEAREST direction that fits, never your habitual favourite. Derive the "
+             f"5 colors from this direction's mood, not from a default palette."
+             if suggested_direction else "")
     return f"""You are a world-class creative director, data visualization expert, and document strategist.
 Return ONLY valid JSON — no markdown fences, no commentary.
 
 CORE DIRECTIVE:
 - Do NOT reuse generic templates. Pick ONE aesthetic direction from: {aesthetics}
-  (or invent a better one). State which direction you chose and why it fits the topic.
+  (or invent a better one). State which direction you chose and why it fits the topic.{dealt}
 - Commit fully to that aesthetic across all {section_count} sections.
 - Use REAL topic-specific data: authentic statistics, dates, names, figures. No lorem ipsum,
   no TODO, no [insert ...] placeholders anywhere.
@@ -160,9 +170,15 @@ FORBIDDEN:
 EVERY SECTION MUST include at least ONE of:
 - chart_data (real numbers), hero_stat (single powerful stat), data_table (styled table),
   stats (3 metric cards), steps (timeline), or image_keyword (real-world visual).
-- Prefer data-native visuals over fake-looking AI photos. Use image_keyword only when a
-  real-world visual materially helps; never request fake people, fake screenshots, fake logos,
-  or readable text inside an image.
+
+IMAGERY (image_keyword) — real photography is what makes the document feel premium:
+- REQUIRED on EVERY section: full-bleed on cover/closing, editorial photo headers and split
+  layouts elsewhere. Vary the subjects — wide establishing shots, aerials, close-up details —
+  so no two sections request the same scene.
+- Write it as a literal stock-photo search query: a CONCRETE, photographable real-world
+  subject in 2-4 words (e.g. "everest khumbu icefall", "container ship port aerial",
+  "surgeon operating room"). No abstract concepts, no adjectives-only phrases.
+- Never request fake people close-ups, brand logos, screenshots, or readable text in images.
 
 NARRATIVE STRUCTURE for {section_count} sections (adapt if count differs — preserve order):
 1.  "cover"       — cinematic opening; declare the aesthetic; subtitle + tagline
@@ -215,7 +231,7 @@ JSON schema (one structure drives the PDF report, the PPTX deck, and the DOCX do
       "left_title": "Perspective A", "left_points": ["15+ word point"],
       "right_title": "Perspective B", "right_points": ["15+ word point"],
       "cta": "closing call to action",
-      "image_keyword": "photorealistic topic image (only when it materially helps)",
+      "image_keyword": "concrete real-world photo search, 2-4 words",
       "speaker_notes": "2-3 sentences a presenter would say on this section.",
       "subsections": [{{"heading": "Sub", "body": "40+ words (deep dives only, max 2)"}}]
     }}
@@ -240,10 +256,12 @@ async def generate_document_spec(prompt: str, section_count: int,
     when the caller requests several formats, each gets its own call (run
     concurrently by main.py) so every file's content is unique to its format.
     """
+    suggested = random.choice(AESTHETIC_DIRECTIONS)
     raw = await _deepinfra_call(
-        [{"role": "system", "content": _system_prompt(section_count, doc_kind)},
+        [{"role": "system",
+          "content": _system_prompt(section_count, doc_kind, suggested)},
          {"role": "user", "content": prompt}],
-        temperature=0.38,
+        temperature=0.55,   # higher creative variance; structure is schema-locked
     )
     data = _as_json(raw, "Document content generator")
     spec = DocumentSpec.from_ai_dict(data, topic_prompt=prompt)

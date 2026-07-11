@@ -107,6 +107,8 @@ PPTX_FONT_PAIRS: List[Dict[str, str]] = [
     {"display": "Cambria", "heading": "Calibri", "body": "Calibri", "data": "Consolas"},
     {"display": "Cambria", "heading": "Arial",   "body": "Arial",   "data": "Consolas"},
     {"display": "Times New Roman", "heading": "Arial", "body": "Arial", "data": "Consolas"},
+    {"display": "Georgia", "heading": "Tahoma",  "body": "Tahoma",  "data": "Consolas"},
+    {"display": "Georgia", "heading": "Verdana", "body": "Verdana", "data": "Consolas"},
 ]
 
 # ─── Palettes ─────────────────────────────────────────────────────────────────
@@ -176,15 +178,15 @@ DEFAULT_PALETTE = "circuit"
 
 
 def match_palette(topic: str, rng: random.Random) -> Palette:
-    """Score palettes by topic keyword hits; tie-break deterministically random."""
+    """Score palettes by topic keyword hits; choose RANDOMLY among the top
+    scorers so the same topic doesn't lock onto one palette forever."""
     text = (topic or "").lower()
-    best, best_score = None, 0
-    for pal in PALETTES.values():
-        score = sum(1 for kw in pal.keywords if kw in text)
-        if score > best_score:
-            best, best_score = pal, score
-    if best is not None:
-        return best
+    scored = [(sum(1 for kw in pal.keywords if kw in text), name)
+              for name, pal in PALETTES.items()]
+    best_score = max(s for s, _ in scored)
+    if best_score > 0:
+        top = sorted(name for s, name in scored if s == best_score)
+        return PALETTES[top[rng.randrange(len(top))]]
     names = sorted(PALETTES)
     return PALETTES[names[rng.randrange(len(names))]]
 
