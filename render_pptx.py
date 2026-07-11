@@ -32,7 +32,9 @@ from pptx.enum.chart import XL_CHART_TYPE
 from pptx.enum.text import PP_ALIGN
 from pptx.oxml import parse_xml
 from pptx.oxml.ns import nsdecls, qn
-from pptx.util import Inches, Pt
+from pptx.util import Emu, Inches, Pt
+
+from pptx.opc.constants import RELATIONSHIP_TYPE as RT
 
 import assets
 from content_model import DocumentSpec, Section
@@ -761,10 +763,36 @@ _BUILDERS = {
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
+def _register_notes_master(prs) -> None:
+    """python-pptx creates the notes-master part and relationship when the
+    first notes slide is added, but never lists it in presentation.xml.
+    PowerPoint ignores the orphaned relationship; Keynote (macOS and iOS)
+    rejects the whole file as "invalid format"."""
+    pres = prs.element
+    if pres.find(qn("p:notesMasterIdLst")) is not None:
+        return
+    rid = next((rel.rId for rel in prs.part.rels.values()
+                if rel.reltype == RT.NOTES_MASTER), None)
+    if rid is None:
+        return
+    lst = parse_xml(
+        f'<p:notesMasterIdLst {nsdecls("p", "r")}>'
+        f'<p:notesMasterId r:id="{rid}"/></p:notesMasterIdLst>'
+    )
+    # schema order: sldMasterIdLst, notesMasterIdLst, …, sldIdLst, sldSz
+    sld_id_lst = pres.find(qn("p:sldIdLst"))
+    if sld_id_lst is not None:
+        sld_id_lst.addprevious(lst)
+    else:
+        pres.insert(1, lst)
+
+
 def render_pptx(spec: DocumentSpec, theme: Theme, seed: Optional[int] = None) -> bytes:
     prs = Presentation()
-    prs.slide_width = Inches(SLIDE_W)
-    prs.slide_height = Inches(SLIDE_H)
+    # exact 16:9; sldSz must be a whole multiple of 12700 EMU (1pt), which
+    # Inches(13.333) misses by 305 EMU
+    prs.slide_width = Emu(12192000)
+    prs.slide_height = Emu(6858000)
 
     deck_seed = theme.seed if seed is None else seed
     plan_pptx_layouts(spec.sections, deck_seed)
@@ -802,6 +830,8 @@ def render_pptx(spec: DocumentSpec, theme: Theme, seed: Optional[int] = None) ->
     core.subject = spec.subtitle or spec.title
     core.comments = f"Theme: {theme.name} · {theme.aesthetic_label}"
     core.created = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    _register_notes_master(prs)
 
     buffer = io.BytesIO()
     prs.save(buffer)
